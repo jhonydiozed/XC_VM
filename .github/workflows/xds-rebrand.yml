@@ -1,0 +1,77 @@
+name: XDS Rebrand Validation
+
+on:
+  pull_request:
+    paths:
+      - 'install'
+      - 'install-xds'
+      - 'xd/scripts/rebrand-xds.py'
+      - 'docs/xd/XDS-REBRAND.md'
+      - '.github/workflows/xds-rebrand.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'install'
+      - 'install-xds'
+      - 'xd/scripts/rebrand-xds.py'
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax validation
+        run: |
+          python3 -m py_compile xd/scripts/rebrand-xds.py
+          bash -n install-xds
+          python3 -m py_compile install
+
+      - name: Dry-run source conversion
+        run: |
+          python3 xd/scripts/rebrand-xds.py --check > /tmp/xds-rebrand-check.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('xd/rebrand-report.json').read_text())
+          assert data['brand'] == 'XD Stream'
+          assert data['runtime_home'] == '/home/xds'
+          assert data['service'] == 'xds.service'
+          assert data['database'] == 'xds'
+          assert data['linux_user'] == 'xds'
+          assert data['conversion']['file_count'] > 0
+          assert 'Vateron-Media/XC_VM' in data['upstream_coordinates_preserved']
+          PY
+
+      - name: Apply conversion in disposable checkout
+        run: |
+          cp -a . /tmp/xds-source
+          cd /tmp/xds-source
+          python3 xd/scripts/rebrand-xds.py --apply
+          python3 xd/scripts/rebrand-xds.py --verify
+          python3 -m py_compile install
+          grep -q '/home/xds' install
+          grep -q 'xds.service' install
+          grep -q 'Creating/verifying xds user' install
+          grep -q 'rDatabase = "xds"' install
+          grep -q 'XDS_RUNTIME_REBRAND_HOOK' install
+          ! grep -q '/home/xc_vm' install
+          ! grep -q 'xc_vm.service' install
+
+      - name: Simulate extracted runtime conversion
+        run: |
+          mkdir -p /tmp/xds-runtime/bin/nginx/conf /tmp/xds-runtime/www
+          cat > /tmp/xds-runtime/service <<'EOF'
+          #!/usr/bin/env bash
+          /home/xc_vm/bin/nginx/sbin/nginx
+          sudo -u xc_vm /home/xc_vm/bin/php/bin/php /home/xc_vm/console.php
+          EOF
+          cat > /tmp/xds-runtime/bin/nginx/conf/nginx.conf <<'EOF'
+          root /home/xc_vm/www;
+          pid /home/xc_vm/tmp/nginx.pid;
+          EOF
+          echo '<?php echo "/home/xc_vm"; ?>' > /tmp/xds-runtime/www/index.php
+          python3 xd/scripts/rebrand-xds.py --runtime-root /tmp/xds-runtime --apply-runtime
+          python3 xd/scripts/rebrand-xds.py --verify --root /tmp/xds-runtime
+          ! grep -R '/home/xc_vm' /tmp/xds-runtime
+          grep -R '/home/xds' /tmp/xds-runtime

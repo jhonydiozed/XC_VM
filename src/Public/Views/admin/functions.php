@@ -9,20 +9,26 @@ use XcVm\Core\Util\NetworkUtils;
 use XcVm\Domain\User\UserRepository;
 
 if (!defined('MAIN_HOME')) {
-	define('MAIN_HOME', '/home/xc_vm/');
+	define('MAIN_HOME', dirname(__DIR__, 3) . '/');
 }
 
-// Импорт глобальных переменных bootstrap'а.
-// XC_Bootstrap::boot(CONTEXT_ADMIN) использует `global` для записи переменных.
-// Когда functions.php включается из метода контроллера (не из глобального scope),
-// эти переменные без `global` не видны в текущем scope.
-// В глобальном scope (прямой вызов через nginx) — это no-op.
+// Import bootstrap globals when this file is included inside a controller method.
 global $db, $rSettings, $rMobile, $rServers, $rProxyServers, $rDetect,
        $rTimeout, $rProtocol, $allServers, $rPermissions, $language, $allowedLangs,
        $rServerError, $allServersHealthy, $updateRequired, $rUserInfo;
 
 require_once MAIN_HOME . 'bootstrap.php';
 XC_Bootstrap::boot(XC_Bootstrap::CONTEXT_ADMIN);
+
+if (!isset($db) || !is_object($db)) {
+	throw new RuntimeException('XDS admin bootstrap did not initialize the database service.');
+}
+if (!isset($rSettings) || !is_array($rSettings)) {
+	throw new RuntimeException('XDS admin bootstrap did not initialize settings.');
+}
+if (!isset($language)) {
+	throw new RuntimeException('XDS admin bootstrap did not initialize the translator.');
+}
 
 if ($rMobile) {
 	$rSettings['js_navigate'] = 0;
@@ -103,9 +109,11 @@ if (isset(RequestManager::getAll()['status'])) {
 
 if (AdminHelpers::getPageName() != 'setup') {
 	$db->query('SELECT COUNT(`id`) AS `count` FROM `users` LEFT JOIN `users_groups` ON `users_groups`.`group_id` = `users`.`member_group_id` WHERE `users_groups`.`is_admin` = 1;');
+	$row = $db->get_row();
+	$adminCount = is_array($row) ? (int) ($row['count'] ?? 0) : 0;
 
-	if ($db->get_row()['count'] == 0) {
-		header('Location: ./setup.php');
+	if ($adminCount === 0) {
+		header('Location: setup');
 		exit();
 	}
 }

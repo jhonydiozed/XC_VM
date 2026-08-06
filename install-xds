@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep the complete wrapper parsed in memory before the rebrand tool edits files
+# in the checkout. Without this function boundary, Bash may continue reading the
+# script after it has been rewritten and execute corrupted partial lines.
+main() {
+    local root_dir backup_dir
+    root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    cd "$root_dir"
+
+    if [[ "${EUID}" -ne 0 ]]; then
+        echo "ERROR: execute como root: sudo bash install-xds" >&2
+        exit 1
+    fi
+
+    command -v python3 >/dev/null 2>&1 || {
+        echo "ERROR: python3 não encontrado" >&2
+        exit 1
+    }
+
+    if [[ ! -f install ]]; then
+        echo "ERROR: instalador base não encontrado em $root_dir/install" >&2
+        exit 1
+    fi
+
+    # Never mix a clean XDS installation with a previous XC_VM runtime.
+    if [[ -e /home/xc_vm || -e /etc/systemd/system/xc_vm.service ]]; then
+        cat >&2 <<'EOF'
+ERROR: foi encontrada uma instalação XC_VM existente.
+O instalador XDS exige Ubuntu limpo ou outra VPS para evitar mistura de caminhos,
+serviços, usuários e bancos. Não renomeie /home/xc_vm manualmente.
+EOF
+        exit 1
+    fi
+
+    if [[ -e /home/xds || -e /etc/systemd/system/xds.service ]]; then
+        echo "ERROR: já existe uma instalação XDS neste servidor" >&2
+        exit 1
+    fi
+
+    backup_dir="${XDS_SOURCE_BACKUP_DIR:-/root/xds-source-before-rebrand-$(date +%Y%m%d-%H%M%S)}"
+    mkdir -p "$backup_dir"
+    cp -a install xd "$backup_dir/"
+
+    printf '%s\n' "Aplicando identidade, usuários, bancos, serviços e caminhos do XD Stream (XDS)..."
+    python3 xd/scripts/rebrand-xds.py --apply
+
+    printf '%s\n' "Validando ausência de referências operacionais antigas no instalador..."
+    python3 xd/scripts/rebrand-xds.py --verify
+
+    grep -q '/home/xds' install
+    grep -q 'xds.service' install
+    grep -q 'Creating/verifying xds user' install
+    grep -q 'rDatabase = "xds"' install
+    grep -q 'XDS_RUNTIME_REBRAND_HOOK' install
+
+    chmod +x install
+    printf '%s\n' "Conversão validada. Iniciando o instalador XDS..."
+    exec python3 install "$@"
+}
+
+main "$@"
