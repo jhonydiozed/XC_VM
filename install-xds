@@ -19,13 +19,39 @@ if [[ ! -f install ]]; then
     exit 1
 fi
 
+# Never mix the clean XDS installation with a prior XC_VM runtime. The first
+# migration must be tested separately and will receive its own rollback tool.
+if [[ -e /home/xc_vm || -e /etc/systemd/system/xc_vm.service ]]; then
+    cat >&2 <<'EOF'
+ERROR: foi encontrada uma instalação XC_VM existente.
+O instalador XDS exige Ubuntu limpo ou outra VPS para evitar mistura de caminhos,
+serviços, usuários e bancos. Não renomeie /home/xc_vm manualmente.
+EOF
+    exit 1
+fi
+
+if [[ -e /home/xds || -e /etc/systemd/system/xds.service ]]; then
+    echo "ERROR: já existe uma instalação XDS neste servidor" >&2
+    exit 1
+fi
+
 BACKUP_DIR="${XDS_SOURCE_BACKUP_DIR:-/root/xds-source-before-rebrand-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$BACKUP_DIR"
-cp -a install "$BACKUP_DIR/install"
+cp -a install xd "$BACKUP_DIR/"
 
-printf '%s\n' "Aplicando identidade e caminhos do XD Stream (XDS)..."
+printf '%s\n' "Aplicando identidade, usuários, bancos, serviços e caminhos do XD Stream (XDS)..."
 python3 xd/scripts/rebrand-xds.py --apply
 
+printf '%s\n' "Validando ausência de referências operacionais antigas no instalador..."
+python3 xd/scripts/rebrand-xds.py --verify
+
+# Required XDS identifiers must be present after conversion.
+grep -q '/home/xds' install
+grep -q 'xds.service' install
+grep -q 'Creating/verifying xds user' install
+grep -q 'rDatabase = "xds"' install
+grep -q 'XDS_RUNTIME_REBRAND_HOOK' install
+
 chmod +x install
-printf '%s\n' "Iniciando o instalador XDS..."
+printf '%s\n' "Conversão validada. Iniciando o instalador XDS..."
 exec python3 install "$@"
