@@ -1,0 +1,35 @@
+name: XD Installer Helper
+
+on:
+  pull_request:
+    paths:
+      - 'xd/scripts/install-binaries-secure.py'
+      - '.github/workflows/xd-installer-helper.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile helper
+        run: python -m py_compile xd/scripts/install-binaries-secure.py
+      - name: Show help
+        run: python xd/scripts/install-binaries-secure.py --help
+      - name: Reject latest release
+        run: |
+          set +e
+          output=$(python xd/scripts/install-binaries-secure.py --release latest --output /tmp/xd-test 2>&1)
+          status=$?
+          set -e
+          test "$status" -ne 0
+          printf '%s\n' "$output" | grep -F 'a fixed release tag is required'
