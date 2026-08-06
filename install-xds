@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "ERROR: execute como root: sudo bash install-xds" >&2
+    exit 1
+fi
+
+command -v python3 >/dev/null 2>&1 || {
+    echo "ERROR: python3 não encontrado" >&2
+    exit 1
+}
+
+if [[ ! -f install ]]; then
+    echo "ERROR: instalador base não encontrado em $ROOT_DIR/install" >&2
+    exit 1
+fi
+
+BACKUP_DIR="${XDS_SOURCE_BACKUP_DIR:-/root/xds-source-before-rebrand-$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$BACKUP_DIR"
+cp -a install "$BACKUP_DIR/install"
+
+printf '%s\n' "Aplicando identidade e caminhos do XD Stream (XDS)..."
+python3 xd/scripts/rebrand-xds.py --apply
+
+chmod +x install
+printf '%s\n' "Iniciando o instalador XDS..."
+exec python3 install "$@"
