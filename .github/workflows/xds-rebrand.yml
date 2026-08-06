@@ -1,0 +1,38 @@
+name: XDS Rebrand Validation
+
+on:
+  pull_request:
+    paths:
+      - 'install-xds'
+      - 'xd/scripts/rebrand-xds.py'
+      - 'docs/xd/XDS-REBRAND.md'
+      - '.github/workflows/xds-rebrand.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'install-xds'
+      - 'xd/scripts/rebrand-xds.py'
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python3 -m py_compile xd/scripts/rebrand-xds.py
+      - name: Shell syntax
+        run: bash -n install-xds
+      - name: Dry-run rebrand
+        run: python3 xd/scripts/rebrand-xds.py --check > /tmp/xds-rebrand.json
+      - name: Validate report
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('xd/rebrand-report.json').read_text())
+          assert data['brand'] == 'XD Stream'
+          assert data['runtime_home'] == '/home/xds'
+          assert data['service'] == 'xds.service'
+          assert data['database'] == 'xds'
+          assert 'Vateron-Media/XC_VM' in data['upstream_coordinates_preserved']
+          PY
