@@ -1,0 +1,33 @@
+name: XD Security Baseline
+
+on:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-validation:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate shell syntax
+        run: |
+          bash -n src/bin/install/update_binaries.sh
+          bash -n xd/scripts/audit-host.sh
+
+      - name: Validate updater security controls
+        run: |
+          grep -F 'hashes.sha256' src/bin/install/update_binaries.sh
+          grep -F 'sha256sum' src/bin/install/update_binaries.sh
+          grep -F 'XD_ALLOW_LATEST' src/bin/install/update_binaries.sh
+          grep -F 'validate_archive_members' src/bin/install/update_binaries.sh
+
+      - name: Compile-check Python installer
+        run: python3 -m py_compile install
