@@ -1,0 +1,30 @@
+name: XD systemd audit
+
+on:
+  pull_request:
+    paths:
+      - 'xd/scripts/audit-systemd-unit.sh'
+      - 'docs/xd/SYSTEMD-HARDENING.md'
+      - '.github/workflows/xd-systemd-audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'xd/scripts/audit-systemd-unit.sh'
+      - 'docs/xd/SYSTEMD-HARDENING.md'
+
+permissions:
+  contents: read
+
+jobs:
+  shell-checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n xd/scripts/audit-systemd-unit.sh
+      - name: Required audit checks
+        run: |
+          grep -F 'systemd-analyze security' xd/scripts/audit-systemd-unit.sh
+          grep -F 'User=root' xd/scripts/audit-systemd-unit.sh
+          grep -F 'NoNewPrivileges=yes' xd/scripts/audit-systemd-unit.sh
+          grep -F 'LimitNOFILE' xd/scripts/audit-systemd-unit.sh
