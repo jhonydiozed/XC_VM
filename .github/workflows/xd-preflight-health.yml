@@ -1,0 +1,32 @@
+name: XD Preflight and Health
+
+on:
+  pull_request:
+    paths:
+      - 'xd/scripts/preflight.py'
+      - 'xd/scripts/healthcheck.sh'
+      - '.github/workflows/xd-preflight-health.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'xd/scripts/preflight.py'
+      - 'xd/scripts/healthcheck.sh'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile preflight
+        run: python -m py_compile xd/scripts/preflight.py
+      - name: Validate shell syntax
+        run: bash -n xd/scripts/healthcheck.sh
+      - name: Confirm read-only preflight behavior
+        run: |
+          ! grep -Eq 'apt(-get)? install|rm -rf /|systemctl (start|stop|restart)|ufw (enable|disable)|iptables -F' xd/scripts/preflight.py
