@@ -1,0 +1,58 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use XdsControl\Database\ConnectionManager;
+use XdsControl\Engine\EngineHealthRepository;
+
+$root = dirname(__DIR__);
+$configFile = $root . '/config/config.php';
+
+if (!is_file($configFile)) {
+    fwrite(STDERR, "Missing config/config.php. Copy config/config.example.php first.\n");
+    exit(2);
+}
+
+spl_autoload_register(static function (string $class) use ($root): void {
+    $prefix = 'XdsControl\\';
+    if (!str_starts_with($class, $prefix)) {
+        return;
+    }
+
+    $relative = substr($class, strlen($prefix));
+    $file = $root . '/src/' . str_replace('\\', '/', $relative) . '.php';
+    if (is_file($file)) {
+        require $file;
+    }
+});
+
+try {
+    $config = require $configFile;
+    $manager = new ConnectionManager($config['database'] ?? []);
+
+    $engine = (new EngineHealthRepository($manager->engine()))->inspect();
+
+    $panel = $manager->panel();
+    $migrationCount = (int) $panel
+        ->query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'")
+        ->fetchColumn();
+
+    $result = [
+        'result' => true,
+        'engine' => $engine,
+        'panel' => [
+            'database' => (string) $panel->query('SELECT DATABASE()')->fetchColumn(),
+            'schema_migrations_table' => $migrationCount === 1,
+        ],
+    ];
+
+    echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL;
+    exit(0);
+} catch (Throwable $exception) {
+    fwrite(STDERR, json_encode([
+        'result' => false,
+        'error' => $exception->getMessage(),
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL);
+    exit(1);
+}
