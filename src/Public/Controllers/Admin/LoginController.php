@@ -2,25 +2,60 @@
 
 namespace XcVm\Public\Controllers\Admin;
 
-/**
- * LoginController — Страница авторизации admin-панели.
- *
- * Login имеет собственный HTML-документ (не использует layout header/footer).
- * Файл admin/login.php содержит полный bootstrap через functions.php.
- * Контроллер делегирует напрямую в legacy-файл.
- *
- * @renders public/Views/admin/login.php
- *
- * @package XC_VM_Public_Controllers_Admin
- * @author  Divarion_D <https://github.com/Divarion-D>
- * @copyright 2025-2026 Vateron Media
- * @link    https://github.com/Vateron-Media/XC_VM
- * @license AGPL-3.0 https://www.gnu.org/licenses/agpl-3.0.html
- */
+use Throwable;
 
+/**
+ * Admin login controller.
+ *
+ * The login view owns its complete HTML document and bootstrap sequence.
+ */
 class LoginController extends BaseAdminController {
 	public function index() {
-		@chdir(MAIN_HOME . 'Public/Views/admin/');
-		require MAIN_HOME . 'Public/Views/admin/login.php';
+		$viewDirectory = MAIN_HOME . 'Public/Views/admin/';
+		$viewFile = $viewDirectory . 'login.php';
+
+		if (!is_file($viewFile) || !is_readable($viewFile)) {
+			http_response_code(500);
+			error_log('XDS login view is missing or unreadable: ' . $viewFile);
+			echo 'XDS login view is unavailable.';
+			return;
+		}
+
+		if (!@chdir($viewDirectory)) {
+			http_response_code(500);
+			error_log('XDS could not enter admin view directory: ' . $viewDirectory);
+			echo 'XDS admin view directory is unavailable.';
+			return;
+		}
+
+		$initialBufferLevel = ob_get_level();
+		ob_start();
+
+		try {
+			require $viewFile;
+			$output = ob_get_clean();
+
+			if ($output === '' && http_response_code() === 200 && !headers_sent()) {
+				http_response_code(500);
+				error_log('XDS login rendered an empty response without redirect or HTTP error.');
+				echo 'XDS login failed to render. Check the PHP error log.';
+				return;
+			}
+
+			echo $output;
+		} catch (Throwable $exception) {
+			while (ob_get_level() > $initialBufferLevel) {
+				ob_end_clean();
+			}
+
+			http_response_code(500);
+			error_log(sprintf(
+				'XDS login exception: %s in %s:%d',
+				$exception->getMessage(),
+				$exception->getFile(),
+				$exception->getLine()
+			));
+			echo 'XDS login initialization failed. Check the PHP error log.';
+		}
 	}
 }
