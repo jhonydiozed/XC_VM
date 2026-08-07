@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PORT="${XDS_CONTROL_PORT:-9080}"
+LISTEN_PORT="${XDS_PUBLIC_PORT:-9081}"
+CONF="/etc/nginx/sites-available/xds-control"
+
+[[ $EUID -eq 0 ]] || { echo "Execute como root" >&2; exit 1; }
+
+apt-get update
+apt-get install -y nginx
+
+cat > "$CONF" <<EOF
+server {
+    listen ${LISTEN_PORT};
+    listen [::]:${LISTEN_PORT};
+    server_name _;
+
+    access_log /var/log/nginx/xds-control-access.log;
+    error_log /var/log/nginx/xds-control-error.log;
+
+    client_max_body_size 20m;
+
+    location / {
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Request-ID \$request_id;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:${PORT}/health;
+        access_log off;
+    }
+}
+EOF
+
+ln -sfn "$CONF" /etc/nginx/sites-enabled/xds-control
+nginx -t
+systemctl enable --now nginx
+systemctl reload nginx
+
+echo "XDS Control publicado em: http://SEU_IP:${LISTEN_PORT}/"
