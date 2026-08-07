@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT="${1:-/root/xds-control-diagnostic-$(date +%Y%m%d-%H%M%S)}"
+PHP_BIN="/home/xc_vm/bin/php/bin/php"
+mkdir -p "$OUT"
+
+run(){
+  local name="$1"; shift
+  { echo "# $*"; "$@"; } >"$OUT/$name.txt" 2>&1 || true
+}
+
+run system uname -a
+run os cat /etc/os-release
+run memory free -h
+run disk df -h
+run services systemctl status xds-control xc_vm mariadb --no-pager -l
+run journal journalctl -u xds-control -u xc_vm -u mariadb -n 300 --no-pager
+run ports ss -lntup
+run processes ps auxf
+run permissions namei -l "$ROOT/public/index.php"
+run config-check "$PHP_BIN" -r '$c=require $argv[1]; $c["database"]["password"]="***"; print_r($c);' "$ROOT/config/config.php"
+run php-modules "$PHP_BIN" -m
+run php-version "$PHP_BIN" -v
+run app-check "$PHP_BIN" "$ROOT/bin/xds-control-check"
+run health curl -sv --max-time 10 http://127.0.0.1:9080/health
+run schema mariadb -e "SELECT TABLE_SCHEMA,COUNT(*) tables_count FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ('xc_vm','xds') GROUP BY TABLE_SCHEMA;"
+
+cp -a "$ROOT/storage/logs" "$OUT/" 2>/dev/null || true
+cp -a /opt/XC_VM/credentials.txt "$OUT/xc_vm-credentials.REDACT-ME.txt" 2>/dev/null || true
+sed -i -E 's/(Password:).*/\1 ***REDACTED***/I' "$OUT/xc_vm-credentials.REDACT-ME.txt" 2>/dev/null || true
+
+tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
+echo "Diagnóstico criado: $OUT.tar.gz"
