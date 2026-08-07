@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO_URL="${XDS_REPO_URL:-https://github.com/jhonydiozed/XC_VM.git}"
+BRANCH="${XDS_BRANCH:-agent/xds-control-foundation}"
+INSTALL_DIR="${XDS_INSTALL_DIR:-/opt/XC_VM}"
+CREDENTIALS_FILE="/root/xds-control-credentials.txt"
+
+log() { printf '\n\033[1;36m[XDS]\033[0m %s\n' "$*"; }
+fail() { printf '\n\033[1;31m[XDS ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+
+[[ ${EUID} -eq 0 ]] || fail "Execute como root."
+[[ -r /etc/os-release ]] || fail "Não foi possível identificar o sistema operacional."
+# shellcheck disable=SC1091
+source /etc/os-release
+[[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "22.04" ]] || \
+    fail "Este instalador exige Ubuntu 22.04. Detectado: ${PRETTY_NAME:-desconhecido}."
+
+export DEBIAN_FRONTEND=noninteractive
+
+log "Atualizando índices e instalando dependências básicas"
+apt-get update
+apt-get install -y --no-install-recommends \
+    git ca-certificates curl python3 openssl mariadb-client jq
+
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+    log "Atualizando repositório existente em ${INSTALL_DIR}"
+    git -C "${INSTALL_DIR}" fetch --prune origin
+    git -C "${INSTALL_DIR}" checkout -B "${BRANCH}" "origin/${BRANCH}"
+elif [[ -e "${INSTALL_DIR}" ]]; then
+    fail "${INSTALL_DIR} já existe e não é um clone Git válido."
+else
+    log "Clonando ${REPO_URL} (${BRANCH})"
+    git clone --branch "${BRANCH}" --single-branch "${REPO_URL}" "${INSTALL_DIR}"
+fi
+
+cd "${INSTALL_DIR}"
+
+if [[ ! -d /home/xc_vm ]]; then
+    log "Instalando o engine XC_VM original"
+    chmod +x install
+    python3 install
+else
+    log "Engine XC_VM já encontrado; instalação original não será repetida"
+fi
+
+systemctl is-active --quiet mariadb || systemctl start mariadb
+systemctl is-active --quiet xc_vm || systemctl start xc_vm
+
+XDS_DB_PASSWORD="${XDS_DB_PASSWORD:-$(openssl rand -base64 36 | tr -d '/+=' | cut -c1-32)}"
+
+log "Criando banco separado xds e usuário restrito xds_app"
+mariadb <<SQL
+CREATE DATABASE IF NOT EXISTS xds
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+CREATE USER IF NOT EXISTS 'xds_app'@'127.0.0.1'
+  IDENTIFIED BY '${XDS_DB_PASSWORD}';
+ALTER USER 'xds_app'@'127.0.0.1'
+  IDENTIFIED BY '${XDS_DB_PASSWORD}';
+
+GRANT SELECT ON xc_vm.* TO 'xds_app'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON xds.* TO 'xds_app'@'127.0.0.1';
+FLUSH PRIVILEGES;
+SQL
+
+log "Aplicando schema inicial do XDS Control"
+mariadb xds < "${INSTALL_DIR}/xds-control/database/001_initial_schema.sql"
+
+log "Gerando configuração local"
+cp -f "${INSTALL_DIR}/xds-control/config/config.example.php" \
+      "${INSTALL_DIR}/xds-control/config/config.php"
+
+XDS_DB_PASSWORD_ESCAPED=$(printf '%s' "${XDS_DB_PASSWORD}" | sed "s/[\\&|]/\\\\&/g")
+sed -i \
+    -e "s|'password' => 'CHANGE_ME'|'password' => '${XDS_DB_PASSWORD_ESCAPED}'|g" \
+    -e "s|'database' => 'xc_vm'|'database' => 'xc_vm'|g" \
+    -e "s|'database' => 'xds'|'database' => 'xds'|g" \
+    "${INSTALL_DIR}/xds-control/config/config.php"
+
+chmod 600 "${INSTALL_DIR}/xds-control/config/config.php"
+chmod +x "${INSTALL_DIR}/xds-control/bin/xds-control-check"
+
+cat > "${CREDENTIALS_FILE}" <<EOF
+XDS Control
+===========
+Database host: 127.0.0.1
+Database user: xds_app
+Database password: ${XDS_DB_PASSWORD}
+Engine database: xc_vm (SELECT only)
+Panel database: xds (full access)
+Repository: ${REPO_URL}
+Branch: ${BRANCH}
+Install directory: ${INSTALL_DIR}
+EOF
+chmod 600 "${CREDENTIALS_FILE}"
+
+log "Executando diagnóstico dos dois bancos"
+PHP_BIN="/home/xc_vm/bin/php/bin/php"
+[[ -x "${PHP_BIN}" ]] || fail "PHP embarcado do XC_VM não foi encontrado em ${PHP_BIN}."
+"${PHP_BIN}" "${INSTALL_DIR}/xds-control/bin/xds-control-check"
+
+log "Instalação concluída"
+printf '\nCredenciais do XDS Control: %s\n' "${CREDENTIALS_FILE}"
+printf 'Engine original: /home/xc_vm\n'
+printf 'Painel em desenvolvimento: %s/xds-control\n' "${INSTALL_DIR}"
