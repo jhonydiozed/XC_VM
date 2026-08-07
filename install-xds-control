@@ -74,10 +74,12 @@ cp -f "${INSTALL_DIR}/xds-control/config/config.example.php" \
 
 XDS_DB_PASSWORD_ESCAPED=$(printf '%s' "${XDS_DB_PASSWORD}" | sed "s/[\\&|]/\\\\&/g")
 sed -i \
-    -e "s|'password' => 'CHANGE_ME'|'password' => '${XDS_DB_PASSWORD_ESCAPED}'|g" \
-    -e "s|'database' => 'xc_vm'|'database' => 'xc_vm'|g" \
-    -e "s|'database' => 'xds'|'database' => 'xds'|g" \
+    "s|'password' => 'ALTERE_ESTA_SENHA'|'password' => '${XDS_DB_PASSWORD_ESCAPED}'|" \
     "${INSTALL_DIR}/xds-control/config/config.php"
+
+if grep -q "ALTERE_ESTA_SENHA" "${INSTALL_DIR}/xds-control/config/config.php"; then
+    fail "A senha do banco não foi gravada na configuração do XDS Control."
+fi
 
 chmod 600 "${INSTALL_DIR}/xds-control/config/config.php"
 chmod +x "${INSTALL_DIR}/xds-control/bin/xds-control-check"
