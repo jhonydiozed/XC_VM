@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PHP_BIN="${PHP_BIN:-/home/xc_vm/bin/php/bin/php}"
+SERVICE_FILE="/etc/systemd/system/xds-control.service"
+ENV_FILE="/etc/xds-control.env"
+PORT="${XDS_CONTROL_PORT:-9080}"
+ADMIN_USER="${XDS_ADMIN_USER:-admin}"
+
+log(){ printf '\n[XDS] %s\n' "$*"; }
+fail(){ printf '\n[XDS ERROR] %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || fail "Execute como root"
+[[ -x "$PHP_BIN" ]] || fail "PHP não encontrado: $PHP_BIN"
+[[ -f "$ROOT/config/config.php" ]] || fail "Configuração ausente: $ROOT/config/config.php"
+
+mkdir -p "$ROOT/storage/logs" "$ROOT/storage/sessions"
+chown -R root:root "$ROOT"
+chmod 750 "$ROOT/storage" "$ROOT/storage/logs" "$ROOT/storage/sessions"
+touch "$ROOT/storage/logs/xds-control.log"
+chmod 640 "$ROOT/storage/logs/xds-control.log"
+
+read -rsp "Senha inicial do administrador XDS: " ADMIN_PASSWORD
+echo
+[[ ${#ADMIN_PASSWORD} -ge 10 ]] || fail "Use pelo menos 10 caracteres"
+
+HASH="$($PHP_BIN -r 'echo password_hash($argv[1], PASSWORD_DEFAULT);' "$ADMIN_PASSWORD")"
+CONFIG="$ROOT/config/config.php"
+DB_HOST="$($PHP_BIN -r '$c=require $argv[1]; echo $c["database"]["host"];' "$CONFIG")"
+DB_PORT="$($PHP_BIN -r '$c=require $argv[1]; echo $c["database"]["port"];' "$CONFIG")"
+DB_USER="$($PHP_BIN -r '$c=require $argv[1]; echo $c["database"]["username"];' "$CONFIG")"
+DB_PASS="$($PHP_BIN -r '$c=require $argv[1]; echo $c["database"]["password"];' "$CONFIG")"
+DB_NAME="$($PHP_BIN -r '$c=require $argv[1]; echo $c["database"]["panel_database"];' "$CONFIG")"
+
+MYSQL_PWD="$DB_PASS" mariadb --protocol=TCP -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" "$DB_NAME" <<SQL
+INSERT INTO admin_users (username, password_hash, display_name, enabled)
+VALUES ('${ADMIN_USER}', '${HASH}', 'XDS Administrator', 1)
+ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), enabled=1;
+INSERT IGNORE INTO admin_user_roles (admin_user_id, role_id)
+SELECT u.id, r.id FROM admin_users u JOIN roles r ON r.name='super_admin' WHERE u.username='${ADMIN_USER}';
+SQL
+
+cat > "$ENV_FILE" <<EOF
+XDS_CONTROL_ROOT=$ROOT
+XDS_CONTROL_PORT=$PORT
+EOF
+chmod 600 "$ENV_FILE"
+
+cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=XDS Control Panel
+After=network.target mariadb.service xc_vm.service
+Requires=mariadb.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=$ROOT
+EnvironmentFile=$ENV_FILE
+ExecStart=$PHP_BIN -d session.save_path=$ROOT/storage/sessions -d log_errors=1 -d error_log=$ROOT/storage/logs/php-error.log -S 127.0.0.1:$PORT -t $ROOT/public $ROOT/public/index.php
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=$ROOT/storage
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now xds-control
+sleep 2
+
+curl -fsS "http://127.0.0.1:$PORT/health" >/tmp/xds-control-health.json || {
+  journalctl -u xds-control -n 100 --no-pager
+  fail "Health check falhou"
+}
+
+log "XDS Control instalado"
+echo "URL local: http://127.0.0.1:$PORT"
+echo "Usuário: $ADMIN_USER"
+echo "Health: /tmp/xds-control-health.json"
