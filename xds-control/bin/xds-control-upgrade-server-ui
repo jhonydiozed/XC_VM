@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import shutil
+import sys
+import time
+
+root = Path('/opt/XC_VM/xds-control')
+index = root / 'public/index.php'
+server_details = root / 'app/server-details.php'
+
+if not index.is_file():
+    print(f'[XDS] Arquivo não encontrado: {index}', file=sys.stderr)
+    sys.exit(1)
+if not server_details.is_file():
+    print(f'[XDS] Módulo não encontrado: {server_details}', file=sys.stderr)
+    sys.exit(1)
+
+text = index.read_text()
+backup = index.with_name(f'index.php.before-server-ui-{time.strftime("%Y%m%d-%H%M%S")}')
+shutil.copy2(index, backup)
+
+# 1) Carrega o módulo de detalhes do servidor.
+needle = "$modules = require XDS_ROOT.'/config/modules.php';"
+insert = needle + "\nrequire_once XDS_ROOT.'/app/server-details.php';"
+if "app/server-details.php" not in text:
+    if needle not in text:
+        print('[XDS] Ponto de inclusão não encontrado.', file=sys.stderr)
+        sys.exit(2)
+    text = text.replace(needle, insert, 1)
+
+# 2) Remove tabelas técnicas da navegação principal.
+text = text.replace(
+    "navTree('Servidores','server',['servers','server_stats','queue'],$modules)",
+    "navTree('Servidores','server',['servers'],$modules)"
+)
+text = text.replace(
+    "navTree('Monitoramento','activity',['active_connections','connection_history','line_activity','stream_errors','stream_logs','panel_logs'],$modules)",
+    "navTree('Monitoramento','activity',['active_connections','connection_history','stream_errors'],$modules)"
+)
+text = text.replace(
+    "navTree('Sistema','gear',['settings','profiles','output_formats','access_codes','cronjobs','signals'],$modules)",
+    "navTree('Sistema','gear',['settings','profiles','output_formats','access_codes','cronjobs'],$modules)"
+)
+
+# 3) Adiciona rota funcional /server?id=N antes do roteamento genérico.
+route_marker = "if($path==='/module'){"
+server_route = """if($path==='/server'){
+    $serverId=max(0,(int)($_GET['id']??0));
+    xdsServerDetails($engineDb,$panelDb,$serverId);
+    exit;
+}
+
+"""
+if "xdsServerDetails($engineDb,$panelDb,$serverId)" not in text:
+    if route_marker not in text:
+        print('[XDS] Ponto de rota não encontrado.', file=sys.stderr)
+        sys.exit(3)
+    text = text.replace(route_marker, server_route + route_marker, 1)
+
+# 4) Converte o botão de gráfico da listagem de servidores em link de detalhes.
+old = "'<button class=\\\"btn btn-sm btn-outline-secondary\\\"><i class=\\\"bi bi-graph-up\\\"></i></button>'"
+new = "'<a class=\\\"btn btn-sm btn-outline-primary\\\" href=\\\"/server?id='.((int)$r['id']).'\\\" title=\\\"Ver detalhes e métricas\\\"><i class=\\\"bi bi-graph-up\\\"></i></a>'"
+if old in text:
+    text = text.replace(old, new, 1)
+else:
+    # Forma não escapada, caso o arquivo seja reformatado posteriormente.
+    old2 = "'<button class=\"btn btn-sm btn-outline-secondary\"><i class=\"bi bi-graph-up\"></i></button>'"
+    new2 = "'<a class=\"btn btn-sm btn-outline-primary\" href=\"/server?id='.((int)$r['id']).'\" title=\"Ver detalhes e métricas\"><i class=\"bi bi-graph-up\"></i></a>'"
+    if old2 in text:
+        text = text.replace(old2, new2, 1)
+
+index.write_text(text)
+print('[XDS] Migração de Servidores aplicada.')
+print(f'[XDS] Backup: {backup}')
+print('[XDS] server_stats/queue/signals não aparecem mais como módulos principais.')
+print('[XDS] Detalhes: /server?id=ID')
