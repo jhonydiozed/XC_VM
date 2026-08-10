@@ -129,7 +129,7 @@ if($path==='/module'){
         $serverId=max(0,(int)($_GET['server_id']??0)); $where=[];$params=[];
         if($serverId){$where[]='ll.server_id=?';$params[]=$serverId;}
         if($q!==''){$where[]='(l.username LIKE ? OR s.stream_display_name LIKE ? OR ll.user_ip LIKE ? OR ll.isp LIKE ? OR ll.user_agent LIKE ?)';for($i=0;$i<5;$i++)$params[]='%'.$q.'%';}
-        $sql='SELECT ll.activity_id,ll.user_id,ll.stream_id,ll.server_id,ll.user_agent,ll.user_ip,ll.container,ll.date_start,ll.geoip_country_code,ll.isp,l.username,l.is_restreamer,s.stream_display_name,s.target_container,sv.server_name FROM lines_live ll LEFT JOIN lines l ON l.id=ll.user_id LEFT JOIN streams s ON s.id=ll.stream_id LEFT JOIN servers sv ON sv.id=ll.server_id'.($where?' WHERE '.implode(' AND ',$where):'').' ORDER BY ll.activity_id DESC LIMIT '.$limit;
+        $sql='SELECT ll.activity_id,ll.user_id,ll.stream_id,ll.server_id,ll.user_agent,ll.user_ip,ll.container,ll.date_start,ll.geoip_country_code,ll.isp,l.username,l.is_restreamer,s.stream_display_name,s.target_container,sv.server_name FROM lines_live ll LEFT JOIN `lines` l ON l.id=ll.user_id LEFT JOIN streams s ON s.id=ll.stream_id LEFT JOIN servers sv ON sv.id=ll.server_id'.($where?' WHERE '.implode(' AND ',$where):'').' ORDER BY ll.activity_id DESC LIMIT '.$limit;
         $st=$engineDb->prepare($sql);$st->execute($params);$data=$st->fetchAll();
         $servers=$engineDb->query('SELECT id,server_name FROM servers ORDER BY `order`,id')->fetchAll();
         $filters='<form class="xds-filterbar mb-3"><input type="hidden" name="name" value="active_connections"><div class="row g-2 align-items-end"><div class="col-12 col-md-4"><label class="form-label">Pesquisar</label><input class="form-control" name="q" value="'.e($q).'" placeholder="Cliente, stream, IP, ISP ou player"></div><div class="col-6 col-md-3"><label class="form-label">Servidor</label><select class="form-select" name="server_id"><option value="0">Todos</option>';
@@ -152,7 +152,7 @@ if($path==='/module'){
 
     if($slug==='lines'){
         $params=[];$where='';if($q!==''){$where=' WHERE l.username LIKE ? OR l.last_ip LIKE ? OR l.contact LIKE ?';$params=['%'.$q.'%','%'.$q.'%','%'.$q.'%'];}
-        $sql='SELECT l.id,l.username,l.password,l.member_id,l.admin_enabled,l.enabled,l.is_trial,l.is_restreamer,l.max_connections,l.exp_date,l.last_activity,(SELECT COUNT(*) FROM lines_live ll WHERE ll.user_id=l.id) online FROM lines l'.$where.' ORDER BY l.id DESC LIMIT '.$limit;
+        $sql='SELECT l.id,l.username,l.password,l.member_id,l.admin_enabled,l.enabled,l.is_trial,l.is_restreamer,l.max_connections,l.exp_date,l.last_activity,(SELECT COUNT(*) FROM lines_live ll WHERE ll.user_id=l.id) online FROM `lines` l'.$where.' ORDER BY l.id DESC LIMIT '.$limit;
         $st=$engineDb->prepare($sql);$st->execute($params);$data=$st->fetchAll();
         $filters='<form class="xds-filterbar mb-3"><input type="hidden" name="name" value="lines"><div class="row g-2 align-items-end"><div class="col-12 col-md-7"><label class="form-label">Pesquisar</label><input class="form-control" name="q" value="'.e($q).'" placeholder="Usuário, IP ou contato"></div><div class="col-5 col-md-2"><label class="form-label">Mostrar</label><select class="form-select" name="limit">';foreach([50,100,250] as $n)$filters.='<option'.($limit===$n?' selected':'').'>'.$n.'</option>';$filters.='</select></div><div class="col-7 col-md-3"><button class="btn btn-primary w-100">Pesquisar linhas</button></div></div></form>';
         $rows=[];foreach($data as $r){$active=(int)$r['enabled']===1&&(int)$r['admin_enabled']===1; $rows[]=[
@@ -169,7 +169,6 @@ if($path==='/module'){
         audit($panelDb,'view_module','module',$slug);render('Servidores',tableShell(['Ordem','Status','Proxy','Nome','IP','Conexões','Rede','CPU','Memória','Ping','Versão','Ações'],$rows),'Main server, load balancers e estado operacional');exit;
     }
 
-    // Fallback temporário para módulos ainda não especializados.
     $table=$m['table']; $where=$m['where']??''; $sql='SELECT * FROM `'.$table.'`'.($where?' WHERE '.$where:'').' LIMIT '.$limit; $data=$engineDb->query($sql)->fetchAll();
     $cols=$data?array_keys($data[0]):array_column($engineDb->query('SHOW COLUMNS FROM `'.$table.'`')->fetchAll(),'Field');
     $hidden=['password','api_key','access_token','play_token','stream_source','data','movie_properties','transcode_attributes','custom_ffmpeg','last_activity_array'];$cols=array_values(array_filter($cols,fn($c)=>!in_array($c,$hidden,true)));
@@ -180,7 +179,6 @@ if($path==='/module'){
 if($path==='/audit'){$data=$panelDb->query('SELECT id,admin_user_id,action,entity_type,entity_id,ip_address,created_at FROM audit_logs ORDER BY id DESC LIMIT 300')->fetchAll();$rows=[];foreach($data as $r)$rows[]=[e($r['id']),e($r['admin_user_id']),'<span class="badge text-bg-info">'.e($r['action']).'</span>',e($r['entity_type']),e($r['entity_id']),e($r['ip_address']),e($r['created_at'])];render('Auditoria XDS',tableShell(['ID','Usuário','Ação','Entidade','ID','IP','Data'],$rows),'Ações administrativas registradas pelo XDS');exit;}
 if($path==='/diagnostics'){$checks=['PHP'=>PHP_VERSION,'Engine DB'=>$engineDb->query('SELECT VERSION()')->fetchColumn(),'Tabelas'=>$engineDb->query('SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()')->fetchColumn(),'Painel DB'=>$panelDb->query('SELECT DATABASE()')->fetchColumn(),'Log gravável'=>is_writable(dirname(XDS_LOG))?'Sim':'Não','Disco livre'=>round(disk_free_space('/')/1073741824,2).' GiB'];$h='<div class="row g-3">';foreach($checks as $n=>$v)$h.='<div class="col-12 col-md-6 col-xl-4"><div class="card xds-panel h-100"><div class="card-body"><div class="xds-muted">'.e($n).'</div><div class="fs-5 fw-bold">'.e($v).'</div></div></div></div>';$h.='</div>';render('Diagnóstico',$h,'Estado do painel, bancos, PHP e armazenamento');exit;}
 
-// Dashboard operacional inspirado na ergonomia do XC_VM.
 $active=(int)$engineDb->query('SELECT COUNT(*) FROM lines_live')->fetchColumn();
 $onlineUsers=(int)$engineDb->query('SELECT COUNT(DISTINCT user_id) FROM lines_live WHERE user_id IS NOT NULL')->fetchColumn();
 $totalLive=(int)$engineDb->query('SELECT COUNT(*) FROM streams WHERE type=1')->fetchColumn();
