@@ -80,6 +80,14 @@ curl -fsS "http://127.0.0.1:$PORT/health" >/tmp/xds-control-health.json || {
   fail "Health check falhou"
 }
 
+# Habilita o primeiro módulo administrativo com escrita controlada.
+if [[ -x "$ROOT/bin/xds-control-enable-lines-management" && -f /opt/XC_VM/credentials.txt ]]; then
+  log "Habilitando criação, edição e auditoria de Linhas"
+  "$ROOT/bin/xds-control-enable-lines-management"
+else
+  log "Gerenciamento de Linhas não foi habilitado automaticamente; verifique credentials.txt"
+fi
+
 log "XDS Control instalado"
 echo "URL local: http://127.0.0.1:$PORT"
 echo "Usuário: $ADMIN_USER"
