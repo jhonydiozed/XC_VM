@@ -13,48 +13,49 @@ fail(){ printf '\n[XDS UPDATE ERROR] %s\n' "$*" >&2; exit 1; }
 [[ -d "$REPO/.git" ]] || fail "Repositório não encontrado em $REPO"
 
 cd "$REPO"
-
 log "Buscando atualizações do Git"
 git fetch origin
-
 log "Atualizando para origin/$BRANCH"
 git checkout "$BRANCH" >/dev/null 2>&1 || true
 git reset --hard "origin/$BRANCH"
 
 chmod +x "$ROOT/bin"/xds-control-* 2>/dev/null || true
 
-# Recovery recompõe CRUD + schema + lixeira/restauração.
-if [[ -x "$ROOT/bin/xds-control-enable-line-recovery" ]]; then
-    log "Recompondo gerenciamento completo de Linhas"
-    "$ROOT/bin/xds-control-enable-line-recovery"
-elif [[ -x "$ROOT/bin/xds-control-enable-lines-management" ]]; then
-    log "Recompondo CRUD de Linhas"
-    "$ROOT/bin/xds-control-enable-lines-management"
-else
-    fail "Scripts de gerenciamento de Linhas ausentes"
-fi
+[[ -x "$ROOT/bin/xds-control-enable-line-recovery" ]] || fail "Instalador modular de Linhas ausente"
+log "Integrando módulo de Linhas e aplicando migrations"
+"$ROOT/bin/xds-control-enable-line-recovery"
 
-log "Validando rotas críticas"
-for ROUTE in line-create line-edit line-audit line-delete line-trash line-restore; do
-    grep -q "$ROUTE" "$INDEX" || fail "Rota $ROUTE ausente após atualização"
+log "Validando arquitetura modular"
+for FILE in \
+  app/LinesModule.php \
+  app/Controllers/LinesController.php \
+  app/Services/LineService.php \
+  app/Repositories/LineRepository.php \
+  app/Views/lines/index.php \
+  app/Views/lines/form.php \
+  app/Views/lines/trash.php \
+  app/Views/lines/audit.php
+do
+  [[ -f "$ROOT/$FILE" ]] || fail "Componente ausente: $FILE"
 done
 
-grep -q 'FROM `lines`' "$INDEX" || fail "Consulta MariaDB-safe da tabela lines não encontrada"
-grep -q 'action=\\"/line-delete\\"' "$INDEX" || fail "Botão Excluir não encontrado na listagem"
-grep -q 'href=\\"/line-trash\\"' "$INDEX" || fail "Botão Lixeira não encontrado"
+grep -q "LinesModule.php" "$INDEX" || fail "Bridge LinesModule ausente do index.php"
+for ROUTE in line-create line-edit line-audit line-delete line-trash line-restore; do
+  grep -Rq "$ROUTE" "$ROOT/app" || fail "Rota $ROUTE ausente no módulo"
+done
+
+grep -q '/line-trash' "$ROOT/app/Views/lines/index.php" || fail "Botão Lixeira ausente"
+grep -q '/line-delete' "$ROOT/app/Views/lines/index.php" || fail "Botão Excluir ausente"
+grep -q '/line-restore' "$ROOT/app/Views/lines/trash.php" || fail "Botão Restaurar ausente"
 
 systemctl restart xds-control
 sleep 2
-
 HEALTH=$(curl -fsS http://127.0.0.1:9080/health) || {
-    journalctl -u xds-control -n 80 --no-pager
-    fail "Health check falhou"
+  journalctl -u xds-control -n 80 --no-pager
+  fail "Health check falhou"
 }
 
 log "Health OK"
 printf '%s\n' "$HEALTH" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$HEALTH"
-
 log "Atualização concluída"
 git log -1 --oneline
-printf '\nRotas confirmadas:\n'
-grep -nE "line-create|line-edit|line-audit|line-delete|line-trash|line-restore" "$INDEX" | head -30 || true
