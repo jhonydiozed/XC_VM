@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPO=/opt/XC_VM
+BRANCH=agent/xds-control-foundation
+ROOT="$REPO/xds-control"
+INDEX="$ROOT/public/index.php"
+
+log(){ printf '\n[XDS UPDATE] %s\n' "$*"; }
+fail(){ printf '\n[XDS UPDATE ERROR] %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || fail "Execute como root"
+[[ -d "$REPO/.git" ]] || fail "Repositório não encontrado em $REPO"
+
+cd "$REPO"
+
+log "Buscando atualizações do Git"
+git fetch origin
+
+log "Atualizando para origin/$BRANCH"
+git checkout "$BRANCH" >/dev/null 2>&1 || true
+git reset --hard "origin/$BRANCH"
+
+chmod +x "$ROOT/bin"/xds-control-* 2>/dev/null || true
+
+# A camada de recovery é o orquestrador atual: recompõe criar/editar/auditar e
+# aplica o schema de snapshots/lixeira. Se ainda não estiver presente, usa o
+# gerenciador CRUD como fallback.
+if [[ -x "$ROOT/bin/xds-control-enable-line-recovery" ]]; then
+    log "Recompondo gerenciamento completo de Linhas"
+    "$ROOT/bin/xds-control-enable-line-recovery"
+elif [[ -x "$ROOT/bin/xds-control-enable-lines-management" ]]; then
+    log "Recompondo CRUD de Linhas"
+    "$ROOT/bin/xds-control-enable-lines-management"
+else
+    fail "Scripts de gerenciamento de Linhas ausentes"
+fi
+
+log "Validando rotas críticas"
+for ROUTE in line-create line-edit line-audit; do
+    grep -q "$ROUTE" "$INDEX" || fail "Rota $ROUTE ausente após atualização"
+done
+
+grep -q 'FROM `lines`' "$INDEX" || fail "Consulta MariaDB-safe da tabela lines não encontrada"
+
+systemctl restart xds-control
+sleep 2
+
+HEALTH=$(curl -fsS http://127.0.0.1:9080/health) || {
+    journalctl -u xds-control -n 80 --no-pager
+    fail "Health check falhou"
+}
+
+log "Health OK"
+printf '%s\n' "$HEALTH" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$HEALTH"
+
+log "Atualização concluída"
+git log -1 --oneline
+printf '\nRotas confirmadas:\n'
+grep -nE "line-create|line-edit|line-audit" "$INDEX" | head -20 || true
