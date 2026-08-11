@@ -2,12 +2,23 @@
 set -Eeuo pipefail
 
 ROOT=/opt/XC_VM
-CFG="$ROOT/xds-control/config/config.php"
-SQL="$ROOT/xds-control/database/002_line_recovery.sql"
+XDS_ROOT="$ROOT/xds-control"
+CFG="$XDS_ROOT/config/config.php"
+SQL="$XDS_ROOT/database/002_line_recovery.sql"
+MANAGEMENT="$XDS_ROOT/bin/xds-control-enable-lines-management"
+INDEX="$XDS_ROOT/public/index.php"
 
 [[ $EUID -eq 0 ]] || { echo "[XDS] Execute como root" >&2; exit 1; }
 [[ -f "$CFG" ]] || { echo "[XDS] config.php ausente" >&2; exit 1; }
 [[ -f "$SQL" ]] || { echo "[XDS] migration 002_line_recovery.sql ausente" >&2; exit 1; }
+[[ -x "$MANAGEMENT" ]] || { echo "[XDS] gerenciador de Linhas ausente/não executável: $MANAGEMENT" >&2; exit 1; }
+
+# IMPORTANTE: git reset --hard restaura o index.php base do branch.
+# Antes de instalar a camada de recuperação, recompomos sempre o CRUD completo
+# (criar, editar e auditar). Isso torna o procedimento idempotente e impede que
+# uma atualização deixe a tela de Linhas novamente somente leitura.
+echo "[XDS] Garantindo CRUD completo de Linhas antes da recuperação..."
+"$MANAGEMENT"
 
 XDS_USER=$(awk -F"'" "/'username'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
 XDS_PASS=$(awk -F"'" "/'password'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
@@ -22,6 +33,20 @@ PANEL_DB=$(awk -F"'" "/'panel_database'[[:space:]]*=>/ {print \$4; exit}" "$CFG"
 MYSQL_PWD="$XDS_PASS" mariadb --no-defaults -h "$XDS_HOST" -u "$XDS_USER" "$PANEL_DB" < "$SQL"
 unset MYSQL_PWD XDS_PASS
 
+# Validação funcional mínima: não aceitamos concluir se as rotas CRUD sumiram.
+echo "[XDS] Validando rotas de Linhas..."
+for ROUTE in "line-create" "line-edit" "line-audit"; do
+    grep -q "$ROUTE" "$INDEX" || {
+        echo "[XDS] ERRO: rota $ROUTE não encontrada em $INDEX" >&2
+        exit 1
+    }
+done
+
+systemctl restart xds-control
+sleep 2
+curl -fsS http://127.0.0.1:9080/health >/dev/null
+
 echo "[XDS] Estrutura de recuperação de Linhas instalada."
+echo "[XDS] CRUD confirmado: criar, editar e auditar."
 echo "[XDS] Exclusão reversível: snapshot + bloqueio da linha no engine."
 echo "[XDS] Edição em massa: snapshots agrupados por batch_uuid."
