@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT=/opt/XC_VM/xds-control
+INDEX="$ROOT/public/index.php"
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="$INDEX.before-line-trash-ui-$STAMP"
+
+[[ $EUID -eq 0 ]] || { echo "[XDS] Execute como root" >&2; exit 1; }
+[[ -f "$INDEX" ]] || { echo "[XDS] index.php não encontrado" >&2; exit 1; }
+
+cp -a "$INDEX" "$BACKUP"
+echo "[XDS] Backup: $BACKUP"
+
+python3 - "$INDEX" <<'PY'
+from pathlib import Path
+import sys
+
+p=Path(sys.argv[1])
+s=p.read_text()
+
+# Rotas de exclusão reversível, lixeira e restauração.
+if "if($path==='/line-trash')" not in s:
+    marker="if($path==='/line-audit'){"
+    route=r'''if($path==='/line-delete'){
+    if($_SERVER['REQUEST_METHOD']!=='POST'){http_response_code(405);exit;}
+    requireCsrf();
+    $id=max(0,(int)($_POST['id']??0));
+    if(!$id) throw new RuntimeException('ID da linha inválido.');
+
+    $st=$engineDb->prepare('SELECT * FROM `lines` WHERE id=? LIMIT 1');
+    $st->execute([$id]);
+    $line=$st->fetch();
+    if(!$line) throw new RuntimeException('Linha não encontrada.');
+
+    $chk=$panelDb->prepare('SELECT id FROM line_trash WHERE line_id=? AND restored_at IS NULL AND permanently_deleted_at IS NULL LIMIT 1');
+    $chk->execute([$id]);
+    if($chk->fetchColumn()) throw new RuntimeException('Esta linha já está na lixeira.');
+
+    $hex=bin2hex(random_bytes(16));
+    $uuid=substr($hex,0,8).'-'.substr($hex,8,4).'-'.substr($hex,12,4).'-'.substr($hex,16,4).'-'.substr($hex,20,12);
+    $beforeJson=json_encode($line,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+    $after=$line;$after['enabled']=0;$after['admin_enabled']=0;
+    $afterJson=json_encode($after,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+
+    $panelDb->beginTransaction();
+    try{
+        $b=$panelDb->prepare("INSERT INTO line_operation_batches (batch_uuid,operation_type,status,admin_user_id,description,affected_count) VALUES (?,'trash','applied',?,?,1)");
+        $b->execute([$uuid,currentUser()['id']??null,'Exclusão reversível da linha #'.$id]);
+        $batchId=(int)$panelDb->lastInsertId();
+
+        $ss=$panelDb->prepare("INSERT INTO line_operation_snapshots (batch_id,line_id,username,operation_type,before_json,after_json) VALUES (?,?,?,'trash',?,?)");
+        $ss->execute([$batchId,$id,$line['username']??null,$beforeJson,$afterJson]);
+
+        $tr=$panelDb->prepare('INSERT INTO line_trash (line_id,username,snapshot_json,batch_id,deleted_by) VALUES (?,?,?,?,?)');
+        $tr->execute([$id,$line['username']??null,$beforeJson,$batchId,currentUser()['id']??null]);
+
+        $engineDb->beginTransaction();
+        try{
+            $up=$engineDb->prepare('UPDATE `lines` SET enabled=0,admin_enabled=0 WHERE id=? LIMIT 1');
+            $up->execute([$id]);
+            $engineDb->commit();
+        }catch(Throwable $e){
+            if($engineDb->inTransaction())$engineDb->rollBack();
+            throw $e;
+        }
+
+        $panelDb->commit();
+    }catch(Throwable $e){
+        if($panelDb->inTransaction())$panelDb->rollBack();
+        throw $e;
+    }
+
+    audit($panelDb,'line_trash','line',(string)$id,['batch_uuid'=>$uuid,'username'=>$line['username']??null]);
+    xdsLog('info','Linha movida para lixeira',['line_id'=>$id,'batch_uuid'=>$uuid,'user'=>currentUser()['username']??null]);
+    header('Location: '.moduleUrl('lines').'&trashed=1');exit;
+}
+
+if($path==='/line-restore'){
+    if($_SERVER['REQUEST_METHOD']!=='POST'){http_response_code(405);exit;}
+    requireCsrf();
+    $trashId=max(0,(int)($_POST['trash_id']??0));
+    if(!$trashId) throw new RuntimeException('Registro da lixeira inválido.');
+
+    $st=$panelDb->prepare('SELECT * FROM line_trash WHERE id=? AND restored_at IS NULL AND permanently_deleted_at IS NULL LIMIT 1');
+    $st->execute([$trashId]);
+    $trash=$st->fetch();
+    if(!$trash) throw new RuntimeException('Registro não encontrado ou já restaurado.');
+
+    $snapshot=json_decode((string)$trash['snapshot_json'],true);
+    if(!is_array($snapshot)) throw new RuntimeException('Snapshot da linha inválido.');
+    $lineId=(int)$trash['line_id'];
+    $enabled=(int)($snapshot['enabled']??0);
+    $adminEnabled=(int)($snapshot['admin_enabled']??0);
+
+    $exists=$engineDb->prepare('SELECT id FROM `lines` WHERE id=? LIMIT 1');
+    $exists->execute([$lineId]);
+    if(!$exists->fetchColumn()) throw new RuntimeException('A linha original não existe mais no engine; restauração física ainda não está habilitada.');
+
+    $engineDb->beginTransaction();
+    try{
+        $up=$engineDb->prepare('UPDATE `lines` SET enabled=?,admin_enabled=? WHERE id=? LIMIT 1');
+        $up->execute([$enabled,$adminEnabled,$lineId]);
+        $engineDb->commit();
+    }catch(Throwable $e){
+        if($engineDb->inTransaction())$engineDb->rollBack();
+        throw $e;
+    }
+
+    $panelDb->beginTransaction();
+    try{
+        $up=$panelDb->prepare('UPDATE line_trash SET restored_at=NOW() WHERE id=? LIMIT 1');
+        $up->execute([$trashId]);
+        if(!empty($trash['batch_id'])){
+            $bb=$panelDb->prepare("UPDATE line_operation_batches SET status='reverted',reverted_at=NOW() WHERE id=? LIMIT 1");
+            $bb->execute([(int)$trash['batch_id']]);
+        }
+        $panelDb->commit();
+    }catch(Throwable $e){
+        if($panelDb->inTransaction())$panelDb->rollBack();
+        throw $e;
+    }
+
+    audit($panelDb,'line_restore','line',(string)$lineId,['trash_id'=>$trashId,'username'=>$trash['username']??null]);
+    xdsLog('info','Linha restaurada da lixeira',['line_id'=>$lineId,'trash_id'=>$trashId,'user'=>currentUser()['username']??null]);
+    header('Location: /line-trash?restored=1');exit;
+}
+
+if($path==='/line-trash'){
+    $data=$panelDb->query('SELECT id,line_id,username,batch_id,deleted_by,deleted_at FROM line_trash WHERE restored_at IS NULL AND permanently_deleted_at IS NULL ORDER BY id DESC LIMIT 500')->fetchAll();
+    $rows=[];
+    foreach($data as $r){
+        $restore='<form method="post" action="/line-restore" class="d-inline" onsubmit="return confirm(\'Restaurar este cliente?\')"><input type="hidden" name="csrf" value="'.e(csrf()).'"><input type="hidden" name="trash_id" value="'.e($r['id']).'"><button class="btn btn-sm btn-success"><i class="bi bi-arrow-counterclockwise me-1"></i>Restaurar</button></form>';
+        $rows[]=[e($r['line_id']),'<span class="main-cell">'.e($r['username']?:'—').'</span>',e($r['deleted_by']?:'—'),e($r['deleted_at']),$restore];
+    }
+    $notice=isset($_GET['restored'])?'<div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>Cliente restaurado com sucesso.</div>':'';
+    $head='<div class="d-flex justify-content-between align-items-center mb-3"><div><span class="fw-semibold">Lixeira de clientes</span><div class="xds-muted">Exclusões reversíveis. Nenhuma linha é apagada fisicamente nesta etapa.</div></div><a class="btn btn-outline-secondary" href="'.e(moduleUrl('lines')).'"><i class="bi bi-arrow-left me-1"></i>Voltar para Linhas</a></div>';
+    audit($panelDb,'view_line_trash','line');
+    render('Lixeira de Linhas',$notice.$head.tableShell(['ID da Linha','Usuário','Excluído por','Excluído em','Ações'],$rows),'Clientes removidos de forma reversível');exit;
+}
+
+'''
+    if marker not in s:
+        raise SystemExit('[XDS] rota /line-audit não encontrada; instale primeiro o gerenciamento de Linhas')
+    s=s.replace(marker,route+marker,1)
+
+# Esconde da listagem normal linhas presentes na lixeira ativa.
+needle="$st=$engineDb->prepare($sql);$st->execute($params);$data=$st->fetchAll();\n        $filters='<div class=\"d-flex justify-content-between align-items-center mb-3\">"
+if needle in s and "line_trash WHERE restored_at IS NULL" not in s.split("if($slug==='lines')",1)[1].split("if($slug==='servers')",1)[0]:
+    repl="$st=$engineDb->prepare($sql);$st->execute($params);$data=$st->fetchAll();\n        $trashedIds=$panelDb->query('SELECT line_id FROM line_trash WHERE restored_at IS NULL AND permanently_deleted_at IS NULL')->fetchAll(PDO::FETCH_COLUMN);\n        if($trashedIds){$trashMap=array_fill_keys(array_map('intval',$trashedIds),true);$data=array_values(array_filter($data,fn($row)=>!isset($trashMap[(int)$row['id']])));}\n        $filters='<div class=\"d-flex justify-content-between align-items-center mb-3\">"
+    s=s.replace(needle,repl,1)
+
+# Toolbar: Adicionar + Lixeira.
+old='<a class=\\"btn btn-success\\" href=\\"/line-create\\"><i class=\\"bi bi-person-plus me-1\\"></i>Adicionar Cliente</a></div><form class=\\"xds-filterbar mb-3\\">'
+new='<div class=\\"d-flex gap-2\\"><a class=\\"btn btn-outline-danger\\" href=\\"/line-trash\\"><i class=\\"bi bi-trash3 me-1\\"></i>Lixeira</a><a class=\\"btn btn-success\\" href=\\"/line-create\\"><i class=\\"bi bi-person-plus me-1\\"></i>Adicionar Cliente</a></div></div><form class=\\"xds-filterbar mb-3\\">'
+if old in s:
+    s=s.replace(old,new,1)
+
+# Ações da linha: Editar + Auditoria + Excluir reversível.
+old="'<div class=\"btn-group btn-group-sm\"><a class=\"btn btn-primary\" href=\"/line-edit?id='.e($r['id']).'\" title=\"Editar\"><i class=\"bi bi-pencil-square\"></i></a><a class=\"btn btn-outline-info\" href=\"/line-audit?id='.e($r['id']).'\" title=\"Auditoria\"><i class=\"bi bi-clock-history\"></i></a></div>'"
+new="'<div class=\"d-flex gap-1\"><div class=\"btn-group btn-group-sm\"><a class=\"btn btn-primary\" href=\"/line-edit?id='.e($r['id']).'\" title=\"Editar\"><i class=\"bi bi-pencil-square\"></i></a><a class=\"btn btn-outline-info\" href=\"/line-audit?id='.e($r['id']).'\" title=\"Auditoria\"><i class=\"bi bi-clock-history\"></i></a></div><form method=\"post\" action=\"/line-delete\" class=\"d-inline\" onsubmit=\"return confirm(\\\'Mover este cliente para a lixeira?\\\')\"><input type=\"hidden\" name=\"csrf\" value=\"'.e(csrf()).'\"><input type=\"hidden\" name=\"id\" value=\"'.e($r['id']).'\"><button class=\"btn btn-sm btn-outline-danger\" title=\"Excluir\"><i class=\"bi bi-trash3\"></i></button></form></div>'"
+if old in s:
+    s=s.replace(old,new,1)
+elif "action=\"/line-delete\"" not in s:
+    raise SystemExit('[XDS] grupo de ações de Linhas não encontrado')
+
+p.write_text(s)
+PY
+
+systemctl restart xds-control
+sleep 2
+
+echo "[XDS] Health:"
+curl -fsS http://127.0.0.1:9080/health | python3 -m json.tool
+
+echo
+echo "[XDS] Rotas de lixeira instaladas:"
+grep -nE "line-delete|line-restore|line-trash" "$INDEX" | head -30 || true
+
+echo
+echo "[XDS] Exclusão reversível e restauração habilitadas."

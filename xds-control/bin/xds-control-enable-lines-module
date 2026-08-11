@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT=/opt/XC_VM/xds-control
+INDEX="$ROOT/public/index.php"
+MODULE="$ROOT/app/LinesModule.php"
+
+[[ $EUID -eq 0 ]] || { echo "[XDS] Execute como root" >&2; exit 1; }
+[[ -f "$INDEX" ]] || { echo "[XDS] index.php ausente" >&2; exit 1; }
+[[ -f "$MODULE" ]] || { echo "[XDS] LinesModule.php ausente" >&2; exit 1; }
+
+python3 - "$INDEX" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1])
+s=p.read_text()
+line="require_once XDS_ROOT.'/app/LinesModule.php';"
+if line not in s:
+    marker="requireLogin();\n\nif($path==='/module'){"
+    if marker not in s:
+        raise SystemExit('[XDS] ponto de integração não encontrado no index.php')
+    s=s.replace(marker, "requireLogin();\n\n"+line+"\n\nif($path==='/module'){", 1)
+p.write_text(s)
+PY
+
+grep -q "LinesModule.php" "$INDEX" || { echo "[XDS] Falha ao integrar LinesModule" >&2; exit 1; }
+echo "[XDS] LinesModule integrado ao roteador principal."

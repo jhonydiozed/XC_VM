@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=/opt/XC_VM/xds-control
+INDEX="$ROOT/public/index.php"
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="$INDEX.before-line-editor-$STAMP"
+
+[ -f "$INDEX" ] || { echo "[XDS] index.php não encontrado" >&2; exit 1; }
+cp -a "$INDEX" "$BACKUP"
+echo "[XDS] Backup: $BACKUP"
+
+python3 - "$INDEX" <<'PY'
+from pathlib import Path
+import sys
+
+p=Path(sys.argv[1])
+s=p.read_text()
+
+marker="requireLogin();\n\nif($path==='/module'){"
+if "/line-edit" not in s:
+    route=r'''requireLogin();
+
+if($path==='/line-edit'){
+    $id=max(0,(int)($_GET['id']??$_POST['id']??0));
+    if(!$id){http_response_code(400);render('Editar Linha','<div class="alert alert-danger">ID da linha inválido.</div>');exit;}
+
+    $st=$engineDb->prepare('SELECT id,member_id,username,password,exp_date,admin_enabled,enabled,admin_notes,max_connections,is_restreamer,is_trial,contact,last_ip,last_activity FROM `lines` WHERE id=? LIMIT 1');
+    $st->execute([$id]);
+    $line=$st->fetch();
+    if(!$line){http_response_code(404);render('Editar Linha','<div class="alert alert-warning">Linha não encontrada.</div>');exit;}
+
+    $notice='';
+    if($_SERVER['REQUEST_METHOD']==='POST'){
+        requireCsrf();
+        $username=trim((string)($_POST['username']??''));
+        $password=trim((string)($_POST['password']??''));
+        $max=max(1,min(10000,(int)($_POST['max_connections']??1)));
+        $enabled=isset($_POST['enabled'])?1:0;
+        $adminEnabled=isset($_POST['admin_enabled'])?1:0;
+        $trial=isset($_POST['is_trial'])?1:0;
+        $restream=isset($_POST['is_restreamer'])?1:0;
+        $contact=trim((string)($_POST['contact']??''));
+        $notes=trim((string)($_POST['admin_notes']??''));
+        $expRaw=trim((string)($_POST['exp_date']??''));
+        $exp=null;
+        if($expRaw!==''){
+            $dt=DateTime::createFromFormat('Y-m-d\TH:i',$expRaw);
+            if(!$dt) throw new RuntimeException('Data de expiração inválida.');
+            $exp=$dt->getTimestamp();
+        }
+        if($username===''||$password==='') throw new RuntimeException('Usuário e senha são obrigatórios.');
+        if(mb_strlen($username)>255||mb_strlen($password)>255) throw new RuntimeException('Usuário ou senha excede 255 caracteres.');
+
+        $before=[
+            'username'=>$line['username'],'exp_date'=>$line['exp_date'],'admin_enabled'=>$line['admin_enabled'],
+            'enabled'=>$line['enabled'],'max_connections'=>$line['max_connections'],'is_trial'=>$line['is_trial'],
+            'is_restreamer'=>$line['is_restreamer'],'contact'=>$line['contact'],'admin_notes'=>$line['admin_notes']
+        ];
+        $up=$engineDb->prepare('UPDATE `lines` SET username=?,password=?,exp_date=?,admin_enabled=?,enabled=?,admin_notes=?,max_connections=?,is_restreamer=?,is_trial=?,contact=? WHERE id=? LIMIT 1');
+        $up->execute([$username,$password,$exp,$adminEnabled,$enabled,$notes,$max,$restream,$trial,$contact,$id]);
+        audit($panelDb,'line_update','line',(string)$id,['before'=>$before,'after'=>[
+            'username'=>$username,'exp_date'=>$exp,'admin_enabled'=>$adminEnabled,'enabled'=>$enabled,
+            'max_connections'=>$max,'is_trial'=>$trial,'is_restreamer'=>$restream,'contact'=>$contact,'admin_notes'=>$notes
+        ]]);
+        xdsLog('info','Linha atualizada',['line_id'=>$id,'user'=>currentUser()['username']??null]);
+        $notice='<div class="alert alert-success"><i class="bi bi-check-circle me-2"></i>Linha atualizada com sucesso.</div>';
+        $st->execute([$id]);$line=$st->fetch();
+    }
+
+    $expInput='';
+    if(!empty($line['exp_date'])) $expInput=date('Y-m-d\\TH:i',(int)$line['exp_date']);
+    $checked=fn($v)=>((int)$v===1?' checked':'');
+    $body=$notice.'<form method="post" class="card xds-panel"><div class="card-header d-flex justify-content-between align-items-center"><div><strong>Linha #'.e($line['id']).'</strong><div class="xds-muted">Último IP: '.e($line['last_ip']?:'—').' · Última atividade: '.e(fmtTime((int)$line['last_activity'])).'</div></div><a class="btn btn-outline-secondary btn-sm" href="'.e(moduleUrl('lines')).'"><i class="bi bi-arrow-left me-1"></i>Voltar</a></div><div class="card-body"><input type="hidden" name="csrf" value="'.e(csrf()).'"><input type="hidden" name="id" value="'.e($id).'"><div class="row g-3">'
+        .'<div class="col-md-6"><label class="form-label">Usuário</label><input class="form-control" name="username" maxlength="255" required value="'.e($line['username']).'"></div>'
+        .'<div class="col-md-6"><label class="form-label">Senha</label><input class="form-control" name="password" maxlength="255" required value="'.e($line['password']).'"></div>'
+        .'<div class="col-md-4"><label class="form-label">Expiração</label><input class="form-control" type="datetime-local" name="exp_date" value="'.e($expInput).'"></div>'
+        .'<div class="col-md-4"><label class="form-label">Máx. Conexões</label><input class="form-control" type="number" min="1" max="10000" name="max_connections" value="'.e($line['max_connections']).'"></div>'
+        .'<div class="col-md-4"><label class="form-label">Proprietário / ID</label><input class="form-control" value="'.e($line['member_id']?:'—').'" disabled><div class="form-text">Edição do proprietário será adicionada com o módulo de revendedores.</div></div>'
+        .'<div class="col-12"><div class="row g-2">'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="enabled" id="enabled"'.$checked($line['enabled']).'><label class="form-check-label" for="enabled">Linha ativa</label></div></div>'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="admin_enabled" id="admin_enabled"'.$checked($line['admin_enabled']).'><label class="form-check-label" for="admin_enabled">Liberada pelo admin</label></div></div>'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="is_trial" id="is_trial"'.$checked($line['is_trial']).'><label class="form-check-label" for="is_trial">Trial</label></div></div>'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="is_restreamer" id="is_restreamer"'.$checked($line['is_restreamer']).'><label class="form-check-label" for="is_restreamer">Restreamer</label></div></div>'
+        .'</div></div>'
+        .'<div class="col-md-6"><label class="form-label">Contato</label><textarea class="form-control" name="contact" rows="3">'.e($line['contact']).'</textarea></div>'
+        .'<div class="col-md-6"><label class="form-label">Notas administrativas</label><textarea class="form-control" name="admin_notes" rows="3">'.e($line['admin_notes']).'</textarea></div>'
+        .'</div></div><div class="card-footer d-flex justify-content-end gap-2"><a href="'.e(moduleUrl('lines')).'" class="btn btn-outline-secondary">Cancelar</a><button class="btn btn-primary"><i class="bi bi-save me-1"></i>Salvar alterações</button></div></form>';
+    render('Editar Linha',$body,'Alterações gravadas diretamente no engine XC_VM e auditadas pelo XDS');exit;
+}
+
+if($path==='/module'){'''
+    if marker not in s:
+        raise SystemExit('[XDS] ponto de inserção da rota não encontrado')
+    s=s.replace(marker,route,1)
+
+# Troca o botão passivo da listagem de Linhas por Editar.
+old="'<button class=\"btn btn-sm btn-outline-secondary\"><i class=\"bi bi-eye\"></i></button>'"
+new="'<a class=\"btn btn-sm btn-primary\" href=\"/line-edit?id='.e($r['id']).'\" title=\"Editar linha\"><i class=\"bi bi-pencil-square\"></i></a>'"
+if old in s:
+    s=s.replace(old,new,1)
+elif '/line-edit?id=' not in s:
+    print('[XDS] aviso: botão da listagem não localizado; rota de edição foi instalada')
+
+p.write_text(s)
+PY
+
+systemctl restart xds-control
+sleep 2
+
+echo "[XDS] Health:"
+curl -fsS http://127.0.0.1:9080/health | python3 -m json.tool
+
+echo "[XDS] Editor instalado. Abra Linhas e clique no ícone de lápis."

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=/opt/XC_VM
+CFG="$ROOT/xds-control/config/config.php"
+CREDS="$ROOT/credentials.txt"
+
+[ -f "$CFG" ] || { echo "[XDS] config.php ausente" >&2; exit 1; }
+[ -f "$CREDS" ] || { echo "[XDS] credentials.txt ausente" >&2; exit 1; }
+
+ROOT_PASS=$(awk -F': ' '/^MariaDB Root Password:/ {print $2; exit}' "$CREDS")
+[ -n "$ROOT_PASS" ] || { echo "[XDS] senha root do MariaDB não encontrada" >&2; exit 1; }
+
+XDS_USER=$(awk -F"'" "/'username'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+XDS_HOST=$(awk -F"'" "/'host'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+[ -n "$XDS_USER" ] || XDS_USER=xds_app
+[ -n "$XDS_HOST" ] || XDS_HOST=127.0.0.1
+
+MYSQL_PWD="$ROOT_PASS" mariadb --no-defaults -u root -e "
+GRANT SELECT, INSERT, UPDATE ON xc_vm.\`lines\` TO '${XDS_USER}'@'127.0.0.1';
+SHOW GRANTS FOR '${XDS_USER}'@'127.0.0.1';
+"
+unset MYSQL_PWD ROOT_PASS
+
+echo "[XDS] Escrita controlada liberada para xc_vm.lines"
+echo "[XDS] Permissões: SELECT, INSERT, UPDATE"
+echo "[XDS] DELETE, DROP e ALTER continuam bloqueados."

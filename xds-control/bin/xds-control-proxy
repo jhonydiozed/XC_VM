@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PORT="${XDS_CONTROL_PORT:-9080}"
+LISTEN_PORT="${XDS_PUBLIC_PORT:-9081}"
+CONF="/etc/nginx/sites-available/xds-control"
+ENABLED="/etc/nginx/sites-enabled/xds-control"
+BACKUP_DIR="/etc/nginx/xds-control-backup"
+
+log() { printf '\n[XDS PROXY] %s\n' "$*"; }
+fail() { printf '\n[XDS PROXY ERROR] %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || fail "Execute como root."
+
+if ss -ltnH "sport = :${LISTEN_PORT}" 2>/dev/null | grep -q .; then
+    OWNER=$(ss -ltnp "sport = :${LISTEN_PORT}" 2>/dev/null || true)
+    if ! grep -q nginx <<<"${OWNER}"; then
+        fail "A porta ${LISTEN_PORT} já está ocupada por outro processo: ${OWNER}"
+    fi
+fi
+
+log "Instalando Nginx do sistema para o proxy isolado"
+apt-get update
+apt-get install -y nginx
+
+mkdir -p "$BACKUP_DIR"
+
+# O XC_VM já ocupa 80/443 com seu Nginx embarcado. O site padrão do pacote
+# Ubuntu deve permanecer desabilitado para o Nginx do sistema escutar apenas 9081.
+if [[ -L /etc/nginx/sites-enabled/default || -f /etc/nginx/sites-enabled/default ]]; then
+    cp -a /etc/nginx/sites-enabled/default "$BACKUP_DIR/default.enabled.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/default
+fi
+
+cat > "$CONF" <<EOF
+server {
+    listen ${LISTEN_PORT};
+    listen [::]:${LISTEN_PORT};
+    server_name _;
+
+    access_log /var/log/nginx/xds-control-access.log;
+    error_log /var/log/nginx/xds-control-error.log;
+
+    client_max_body_size 20m;
+
+    location / {
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Request-ID \$request_id;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+    }
+
+    location = /health {
+        proxy_pass http://127.0.0.1:${PORT}/health;
+        access_log off;
+    }
+}
+EOF
+
+ln -sfn "$CONF" "$ENABLED"
+
+log "Validando configuração"
+nginx -t
+
+log "Iniciando Nginx do sistema sem interferir no XC_VM"
+systemctl enable nginx >/dev/null 2>&1 || true
+systemctl restart nginx
+
+systemctl is-active --quiet nginx || {
+    systemctl status nginx --no-pager -l || true
+    journalctl -u nginx -n 100 --no-pager || true
+    fail "O Nginx do proxy não iniciou."
+}
+
+curl -fsS --max-time 10 "http://127.0.0.1:${LISTEN_PORT}/health" >/tmp/xds-control-proxy-health.json || {
+    cat /tmp/xds-control-proxy-health.json 2>/dev/null || true
+    fail "O proxy iniciou, mas o health check falhou."
+}
+
+log "Proxy concluído"
+echo "XDS Control publicado em: http://SEU_IP:${LISTEN_PORT}/"
+echo "Health local: /tmp/xds-control-proxy-health.json"

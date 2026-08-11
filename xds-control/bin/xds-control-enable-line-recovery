@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT=/opt/XC_VM
+XDS_ROOT="$ROOT/xds-control"
+CFG="$XDS_ROOT/config/config.php"
+SQL="$XDS_ROOT/database/002_line_recovery.sql"
+BRIDGE="$XDS_ROOT/bin/xds-control-enable-lines-module"
+INDEX="$XDS_ROOT/public/index.php"
+
+[[ $EUID -eq 0 ]] || { echo "[XDS] Execute como root" >&2; exit 1; }
+[[ -f "$CFG" ]] || { echo "[XDS] config.php ausente" >&2; exit 1; }
+[[ -f "$SQL" ]] || { echo "[XDS] migration 002_line_recovery.sql ausente" >&2; exit 1; }
+[[ -x "$BRIDGE" ]] || { echo "[XDS] bridge de Linhas ausente/não executável" >&2; exit 1; }
+
+"$BRIDGE"
+
+XDS_USER=$(awk -F"'" "/'username'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+XDS_PASS=$(awk -F"'" "/'password'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+XDS_HOST=$(awk -F"'" "/'host'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+PANEL_DB=$(awk -F"'" "/'panel_database'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+
+[[ -n "$XDS_USER" ]] || XDS_USER=xds_app
+[[ -n "$XDS_HOST" ]] || XDS_HOST=127.0.0.1
+[[ -n "$PANEL_DB" ]] || PANEL_DB=xds
+[[ -n "$XDS_PASS" ]] || { echo "[XDS] senha do xds_app não encontrada" >&2; exit 1; }
+
+MYSQL_PWD="$XDS_PASS" mariadb --no-defaults -h "$XDS_HOST" -u "$XDS_USER" "$PANEL_DB" < "$SQL"
+unset MYSQL_PWD XDS_PASS
+
+for FILE in \
+  "$XDS_ROOT/app/LinesModule.php" \
+  "$XDS_ROOT/app/Controllers/LinesController.php" \
+  "$XDS_ROOT/app/Services/LineService.php" \
+  "$XDS_ROOT/app/Repositories/LineRepository.php" \
+  "$XDS_ROOT/app/Views/lines/index.php" \
+  "$XDS_ROOT/app/Views/lines/form.php" \
+  "$XDS_ROOT/app/Views/lines/trash.php" \
+  "$XDS_ROOT/app/Views/lines/audit.php"
+do
+  [[ -f "$FILE" ]] || { echo "[XDS] componente ausente: $FILE" >&2; exit 1; }
+done
+
+grep -q "LinesModule.php" "$INDEX" || { echo "[XDS] LinesModule não integrado" >&2; exit 1; }
+
+systemctl restart xds-control
+sleep 2
+curl -fsS http://127.0.0.1:9080/health >/dev/null
+
+echo "[XDS] Gerenciamento modular de Linhas instalado."
+echo "[XDS] Recursos: listar, criar, editar, auditar, excluir reversivelmente, lixeira e restaurar."

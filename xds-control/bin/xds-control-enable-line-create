@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=/opt/XC_VM/xds-control
+INDEX="$ROOT/public/index.php"
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="$INDEX.before-line-create-$STAMP"
+
+[ -f "$INDEX" ] || { echo "[XDS] index.php não encontrado" >&2; exit 1; }
+cp -a "$INDEX" "$BACKUP"
+echo "[XDS] Backup: $BACKUP"
+
+python3 - "$INDEX" <<'PY'
+from pathlib import Path
+import sys
+
+p=Path(sys.argv[1])
+s=p.read_text()
+
+# Instala a rota de criação antes da rota de edição.
+if "if($path==='/line-create')" not in s:
+    marker="if($path==='/line-edit'){"
+    route=r'''if($path==='/line-create'){
+    $notice='';
+    $generatedUser='u'.bin2hex(random_bytes(4));
+    $generatedPass=bin2hex(random_bytes(5));
+
+    if($_SERVER['REQUEST_METHOD']==='POST'){
+        requireCsrf();
+        $username=trim((string)($_POST['username']??''));
+        $password=trim((string)($_POST['password']??''));
+        $max=max(1,min(10000,(int)($_POST['max_connections']??1)));
+        $enabled=isset($_POST['enabled'])?1:0;
+        $adminEnabled=isset($_POST['admin_enabled'])?1:0;
+        $trial=isset($_POST['is_trial'])?1:0;
+        $restream=isset($_POST['is_restreamer'])?1:0;
+        $contact=trim((string)($_POST['contact']??''));
+        $notes=trim((string)($_POST['admin_notes']??''));
+        $memberId=max(0,(int)($_POST['member_id']??0));
+        $expRaw=trim((string)($_POST['exp_date']??''));
+        $exp=null;
+        if($expRaw!==''){
+            $dt=DateTime::createFromFormat('Y-m-d\\TH:i',$expRaw);
+            if(!$dt) throw new RuntimeException('Data de expiração inválida.');
+            $exp=$dt->getTimestamp();
+        }
+        if($username===''||$password==='') throw new RuntimeException('Usuário e senha são obrigatórios.');
+        if(mb_strlen($username)>255||mb_strlen($password)>255) throw new RuntimeException('Usuário ou senha excede 255 caracteres.');
+
+        $dup=$engineDb->prepare('SELECT id FROM `lines` WHERE username=? LIMIT 1');
+        $dup->execute([$username]);
+        if($dup->fetchColumn()) throw new RuntimeException('Já existe uma linha com este usuário.');
+
+        $ins=$engineDb->prepare('INSERT INTO `lines` (member_id,username,password,exp_date,admin_enabled,enabled,admin_notes,max_connections,is_restreamer,is_trial,contact) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+        $ins->execute([$memberId,$username,$password,$exp,$adminEnabled,$enabled,$notes,$max,$restream,$trial,$contact]);
+        $id=(int)$engineDb->lastInsertId();
+
+        audit($panelDb,'line_create','line',(string)$id,[
+            'username'=>$username,'member_id'=>$memberId,'exp_date'=>$exp,
+            'admin_enabled'=>$adminEnabled,'enabled'=>$enabled,'max_connections'=>$max,
+            'is_trial'=>$trial,'is_restreamer'=>$restream,'contact'=>$contact
+        ]);
+        xdsLog('info','Linha criada',['line_id'=>$id,'username'=>$username,'user'=>currentUser()['username']??null]);
+        header('Location: /line-edit?id='.$id.'&created=1');
+        exit;
+    }
+
+    $defaultExp=date('Y-m-d\\TH:i',time()+30*86400);
+    $body='<form method="post" class="card xds-panel">'
+        .'<div class="card-header d-flex justify-content-between align-items-center"><div><strong>Adicionar Cliente / Linha</strong><div class="xds-muted">Crie uma nova assinatura no engine XC_VM.</div></div><a class="btn btn-outline-secondary btn-sm" href="'.e(moduleUrl('lines')).'"><i class="bi bi-arrow-left me-1"></i>Voltar</a></div>'
+        .'<div class="card-body"><input type="hidden" name="csrf" value="'.e(csrf()).'"><div class="row g-3">'
+        .'<div class="col-md-6"><label class="form-label">Usuário</label><div class="input-group"><input id="new_username" class="form-control" name="username" maxlength="255" required value="'.e($generatedUser).'"><button class="btn btn-outline-secondary" type="button" onclick="xdsGen(8,\'new_username\')"><i class="bi bi-arrow-repeat"></i></button></div></div>'
+        .'<div class="col-md-6"><label class="form-label">Senha</label><div class="input-group"><input id="new_password" class="form-control" name="password" maxlength="255" required value="'.e($generatedPass).'"><button class="btn btn-outline-secondary" type="button" onclick="xdsGen(10,\'new_password\')"><i class="bi bi-arrow-repeat"></i></button></div></div>'
+        .'<div class="col-md-4"><label class="form-label">Expiração</label><input class="form-control" type="datetime-local" name="exp_date" value="'.e($defaultExp).'"></div>'
+        .'<div class="col-md-4"><label class="form-label">Máx. Conexões</label><input class="form-control" type="number" min="1" max="10000" name="max_connections" value="1"></div>'
+        .'<div class="col-md-4"><label class="form-label">Proprietário / ID</label><input class="form-control" type="number" min="0" name="member_id" value="0"><div class="form-text">0 = administrador principal.</div></div>'
+        .'<div class="col-12"><div class="row g-2">'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="enabled" id="create_enabled" checked><label class="form-check-label" for="create_enabled">Linha ativa</label></div></div>'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="admin_enabled" id="create_admin_enabled" checked><label class="form-check-label" for="create_admin_enabled">Liberada pelo admin</label></div></div>'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="is_trial" id="create_trial"><label class="form-check-label" for="create_trial">Trial</label></div></div>'
+        .'<div class="col-6 col-lg-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="is_restreamer" id="create_restream"><label class="form-check-label" for="create_restream">Restreamer</label></div></div>'
+        .'</div></div>'
+        .'<div class="col-md-6"><label class="form-label">Contato</label><textarea class="form-control" name="contact" rows="3" placeholder="Nome, telefone, e-mail ou observação"></textarea></div>'
+        .'<div class="col-md-6"><label class="form-label">Notas administrativas</label><textarea class="form-control" name="admin_notes" rows="3"></textarea></div>'
+        .'</div><div class="alert alert-info mt-4 mb-0"><i class="bi bi-info-circle me-2"></i>Bouquets, pacotes e formatos de saída serão configurados na próxima etapa do editor.</div></div>'
+        .'<div class="card-footer d-flex justify-content-end gap-2"><a href="'.e(moduleUrl('lines')).'" class="btn btn-outline-secondary">Cancelar</a><button class="btn btn-success"><i class="bi bi-person-plus me-1"></i>Criar cliente</button></div></form>';
+    $js='<script>function xdsGen(n,id){const c="ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";let s="";for(let i=0;i<n;i++)s+=c[Math.floor(Math.random()*c.length)];document.getElementById(id).value=s;}</script>';
+    render('Adicionar Cliente',$body,'Nova linha de acesso no XC_VM',$js);exit;
+}
+
+'''
+    if marker not in s:
+        raise SystemExit('[XDS] rota /line-edit não encontrada; instale primeiro o editor de linhas')
+    s=s.replace(marker,route+marker,1)
+
+# Adiciona toolbar na tela de Linhas, antes dos filtros.
+if 'href="/line-create"' not in s:
+    needle="$filters='<form class=\"xds-filterbar mb-3\"><input type=\"hidden\" name=\"name\" value=\"lines\">"
+    repl="$filters='<div class=\"d-flex justify-content-between align-items-center mb-3\"><div><span class=\"fw-semibold\">Gerenciamento de clientes</span><div class=\"xds-muted\">Crie, pesquise e edite linhas de acesso.</div></div><a class=\"btn btn-success\" href=\"/line-create\"><i class=\"bi bi-person-plus me-1\"></i>Adicionar Cliente</a></div><form class=\"xds-filterbar mb-3\"><input type=\"hidden\" name=\"name\" value=\"lines\">"
+    if needle not in s:
+        raise SystemExit('[XDS] bloco de filtros de Linhas não encontrado')
+    s=s.replace(needle,repl,1)
+
+p.write_text(s)
+PY
+
+systemctl restart xds-control
+sleep 2
+
+echo "[XDS] Health:"
+curl -fsS http://127.0.0.1:9080/health | python3 -m json.tool
+
+echo "[XDS] Botão Adicionar Cliente instalado em Linhas."
+echo "[XDS] URL direta: http://127.0.0.1:9080/line-create"

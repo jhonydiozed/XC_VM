@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT=/opt/XC_VM/xds-control
+INDEX="$ROOT/public/index.php"
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="$INDEX.before-lines-management-$STAMP"
+
+[[ $EUID -eq 0 ]] || { echo "[XDS] Execute como root" >&2; exit 1; }
+[[ -f "$INDEX" ]] || { echo "[XDS] index.php não encontrado" >&2; exit 1; }
+
+cp -a "$INDEX" "$BACKUP"
+echo "[XDS] Backup geral: $BACKUP"
+
+# Compatibilidade MariaDB 11 para a tabela reservada `lines`.
+chmod +x "$ROOT/bin/xds-control-fix-lines-keyword" \
+         "$ROOT/bin/xds-control-enable-lines-write" \
+         "$ROOT/bin/xds-control-enable-line-editor" \
+         "$ROOT/bin/xds-control-enable-line-create"
+
+"$ROOT/bin/xds-control-fix-lines-keyword"
+"$ROOT/bin/xds-control-enable-lines-write"
+"$ROOT/bin/xds-control-enable-line-editor"
+"$ROOT/bin/xds-control-enable-line-create"
+
+python3 - "$INDEX" <<'PY'
+from pathlib import Path
+import sys
+
+p=Path(sys.argv[1])
+s=p.read_text()
+
+# Rota de auditoria por linha.
+if "if($path==='/line-audit')" not in s:
+    marker="if($path==='/line-create'){"
+    route=r'''if($path==='/line-audit'){
+    $id=max(0,(int)($_GET['id']??0));
+    if(!$id){http_response_code(400);render('Auditoria da Linha','<div class="alert alert-danger">ID da linha inválido.</div>');exit;}
+
+    $st=$engineDb->prepare('SELECT id,username,last_ip,last_activity FROM `lines` WHERE id=? LIMIT 1');
+    $st->execute([$id]);
+    $line=$st->fetch();
+    if(!$line){http_response_code(404);render('Auditoria da Linha','<div class="alert alert-warning">Linha não encontrada.</div>');exit;}
+
+    $a=$panelDb->prepare("SELECT id,admin_user_id,action,ip_address,metadata_json,created_at FROM audit_logs WHERE entity_type='line' AND entity_id=? ORDER BY id DESC LIMIT 300");
+    $a->execute([(string)$id]);
+    $logs=$a->fetchAll();
+    $rows=[];
+    foreach($logs as $r){
+        $meta='—';
+        if(!empty($r['metadata_json'])){
+            $decoded=json_decode((string)$r['metadata_json'],true);
+            if(is_array($decoded)){
+                if(isset($decoded['before'])||isset($decoded['after'])){
+                    $parts=[];
+                    foreach(($decoded['after']??[]) as $k=>$v){
+                        $old=$decoded['before'][$k]??null;
+                        if($old!=$v) $parts[]=ucwords(str_replace('_',' ',$k)).': '.(is_scalar($old)?(string)$old:'—').' → '.(is_scalar($v)?(string)$v:'—');
+                    }
+                    $meta=$parts?implode('<br>',$parts):'Sem alteração de campos visíveis';
+                } else {
+                    $parts=[];
+                    foreach($decoded as $k=>$v){ if(is_scalar($v)||$v===null)$parts[]=ucwords(str_replace('_',' ',$k)).': '.e($v??'—'); }
+                    $meta=$parts?implode('<br>',$parts):'—';
+                }
+            }
+        }
+        $label=match($r['action']){'line_create'=>'Cliente criado','line_update'=>'Cliente editado',default=>$r['action']};
+        $rows[]=[e($r['id']),'<span class="badge text-bg-info">'.e($label).'</span>',e($r['admin_user_id']?:'—'),e($r['ip_address']?:'—'),$meta,e($r['created_at'])];
+    }
+    $head='<div class="card xds-panel mb-3"><div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3"><div><div class="fw-bold fs-5">'.e($line['username']).'</div><div class="xds-muted">Linha #'.e($id).' · Último IP: '.e($line['last_ip']?:'—').' · Última atividade: '.e(fmtTime((int)$line['last_activity'])).'</div></div><div class="d-flex gap-2"><a class="btn btn-primary" href="/line-edit?id='.e($id).'"><i class="bi bi-pencil-square me-1"></i>Editar</a><a class="btn btn-outline-secondary" href="'.e(moduleUrl('lines')).'"><i class="bi bi-arrow-left me-1"></i>Voltar</a></div></div></div>';
+    audit($panelDb,'view_line_audit','line',(string)$id);
+    render('Auditoria da Linha',$head.tableShell(['ID','Ação','Administrador','IP','Alterações','Data'],$rows),'Histórico administrativo da linha #'.$id);exit;
+}
+
+'''
+    if marker not in s:
+        raise SystemExit('[XDS] rota /line-create não encontrada após instalação do CRUD')
+    s=s.replace(marker,route+marker,1)
+
+# Adiciona botão Auditoria no cabeçalho do editor.
+if 'href="/line-audit?id=' not in s:
+    old="<a class=\"btn btn-outline-secondary btn-sm\" href=\"'.e(moduleUrl('lines')).'\"><i class=\"bi bi-arrow-left me-1\"></i>Voltar</a>"
+    new="<div class=\"d-flex gap-2\"><a class=\"btn btn-outline-info btn-sm\" href=\"/line-audit?id='.e($id).'\"><i class=\"bi bi-clock-history me-1\"></i>Auditoria</a><a class=\"btn btn-outline-secondary btn-sm\" href=\"'.e(moduleUrl('lines')).'\"><i class=\"bi bi-arrow-left me-1\"></i>Voltar</a></div>"
+    if old in s:
+        s=s.replace(old,new,1)
+
+# Garante que a listagem tenha Editar + Auditoria, substituindo o primeiro botão de edição simples da seção de Linhas.
+needle="'<a class=\"btn btn-sm btn-primary\" href=\"/line-edit?id='.e($r['id']).'\" title=\"Editar linha\"><i class=\"bi bi-pencil-square\"></i></a>'"
+replacement="'<div class=\"btn-group btn-group-sm\"><a class=\"btn btn-primary\" href=\"/line-edit?id='.e($r['id']).'\" title=\"Editar\"><i class=\"bi bi-pencil-square\"></i></a><a class=\"btn btn-outline-info\" href=\"/line-audit?id='.e($r['id']).'\" title=\"Auditoria\"><i class=\"bi bi-clock-history\"></i></a></div>'"
+if needle in s:
+    s=s.replace(needle,replacement,1)
+
+p.write_text(s)
+PY
+
+systemctl restart xds-control
+sleep 2
+
+echo "[XDS] Health:"
+curl -fsS http://127.0.0.1:9080/health | python3 -m json.tool
+
+echo
+printf '[XDS] Rotas instaladas:\n'
+grep -nE "line-create|line-edit|line-audit" "$INDEX" | head -20 || true
+
+echo
+printf '[XDS] Consultas lines sem escape (deve ficar vazio):\n'
+grep -nE 'FROM lines|JOIN lines' "$INDEX" || true
+
+echo
+printf '[XDS] Gerenciamento de Linhas habilitado: criar, editar e auditar.\n'

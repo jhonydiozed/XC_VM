@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=/opt/XC_VM/xds-control
+FILE="$ROOT/public/index.php"
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP="$FILE.before-lines-keyword-$STAMP"
+
+cp -a "$FILE" "$BACKUP"
+echo "[XDS] Backup: $BACKUP"
+
+python3 - <<'PY'
+from pathlib import Path
+p = Path('/opt/XC_VM/xds-control/public/index.php')
+s = p.read_text()
+replacements = {
+    ' LEFT JOIN lines l ON ': ' LEFT JOIN `lines` l ON ',
+    ' FROM lines l': ' FROM `lines` l',
+    'FROM lines l': 'FROM `lines` l',
+    'JOIN lines l ON': 'JOIN `lines` l ON',
+}
+for old, new in replacements.items():
+    s = s.replace(old, new)
+p.write_text(s)
+PY
+
+systemctl restart xds-control
+sleep 2
+
+echo '[XDS] Health:'
+curl -fsS http://127.0.0.1:9080/health | jq . || true
+
+echo '[XDS] Verificando referências SQL de lines:'
+grep -nE 'FROM [`]?lines[`]? l|JOIN [`]?lines[`]? l' "$FILE" || true
+
+echo '[XDS] Últimos erros:'
+tail -n 20 "$ROOT/storage/logs/xds-control.log" || true
