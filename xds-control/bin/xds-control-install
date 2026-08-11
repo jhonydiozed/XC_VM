@@ -80,17 +80,11 @@ curl -fsS "http://127.0.0.1:$PORT/health" >/tmp/xds-control-health.json || {
   fail "Health check falhou"
 }
 
-# Sempre instala a pilha completa de gerenciamento de Linhas. O script de
-# recuperação recompõe o CRUD primeiro e em seguida aplica snapshots/lixeira,
-# evitando regressões após git reset --hard.
 if [[ -x "$ROOT/bin/xds-control-enable-line-recovery" && -f /opt/XC_VM/credentials.txt ]]; then
-  log "Habilitando gerenciamento completo e recuperação de Linhas"
+  log "Instalando gerenciamento modular de Linhas"
   "$ROOT/bin/xds-control-enable-line-recovery"
-elif [[ -x "$ROOT/bin/xds-control-enable-lines-management" && -f /opt/XC_VM/credentials.txt ]]; then
-  log "Habilitando criação, edição e auditoria de Linhas"
-  "$ROOT/bin/xds-control-enable-lines-management"
 else
-  log "Gerenciamento de Linhas não foi habilitado automaticamente; verifique credentials.txt"
+  fail "Gerenciamento modular de Linhas ausente ou credentials.txt não encontrado"
 fi
 
 log "XDS Control instalado"
