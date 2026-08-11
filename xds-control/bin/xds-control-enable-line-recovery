@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT=/opt/XC_VM
+CFG="$ROOT/xds-control/config/config.php"
+SQL="$ROOT/xds-control/database/002_line_recovery.sql"
+
+[[ $EUID -eq 0 ]] || { echo "[XDS] Execute como root" >&2; exit 1; }
+[[ -f "$CFG" ]] || { echo "[XDS] config.php ausente" >&2; exit 1; }
+[[ -f "$SQL" ]] || { echo "[XDS] migration 002_line_recovery.sql ausente" >&2; exit 1; }
+
+XDS_USER=$(awk -F"'" "/'username'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+XDS_PASS=$(awk -F"'" "/'password'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+XDS_HOST=$(awk -F"'" "/'host'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+PANEL_DB=$(awk -F"'" "/'panel_database'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
+
+[[ -n "$XDS_USER" ]] || XDS_USER=xds_app
+[[ -n "$XDS_HOST" ]] || XDS_HOST=127.0.0.1
+[[ -n "$PANEL_DB" ]] || PANEL_DB=xds
+[[ -n "$XDS_PASS" ]] || { echo "[XDS] senha do xds_app não encontrada" >&2; exit 1; }
+
+MYSQL_PWD="$XDS_PASS" mariadb --no-defaults -h "$XDS_HOST" -u "$XDS_USER" "$PANEL_DB" < "$SQL"
+unset MYSQL_PWD XDS_PASS
+
+echo "[XDS] Estrutura de recuperação de Linhas instalada."
+echo "[XDS] Exclusão reversível: snapshot + bloqueio da linha no engine."
+echo "[XDS] Edição em massa: snapshots agrupados por batch_uuid."
