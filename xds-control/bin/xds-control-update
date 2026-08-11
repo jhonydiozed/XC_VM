@@ -23,9 +23,7 @@ git reset --hard "origin/$BRANCH"
 
 chmod +x "$ROOT/bin"/xds-control-* 2>/dev/null || true
 
-# A camada de recovery é o orquestrador atual: recompõe criar/editar/auditar e
-# aplica o schema de snapshots/lixeira. Se ainda não estiver presente, usa o
-# gerenciador CRUD como fallback.
+# Recovery recompõe CRUD + schema + lixeira/restauração.
 if [[ -x "$ROOT/bin/xds-control-enable-line-recovery" ]]; then
     log "Recompondo gerenciamento completo de Linhas"
     "$ROOT/bin/xds-control-enable-line-recovery"
@@ -37,11 +35,13 @@ else
 fi
 
 log "Validando rotas críticas"
-for ROUTE in line-create line-edit line-audit; do
+for ROUTE in line-create line-edit line-audit line-delete line-trash line-restore; do
     grep -q "$ROUTE" "$INDEX" || fail "Rota $ROUTE ausente após atualização"
 done
 
 grep -q 'FROM `lines`' "$INDEX" || fail "Consulta MariaDB-safe da tabela lines não encontrada"
+grep -q 'action=\\"/line-delete\\"' "$INDEX" || fail "Botão Excluir não encontrado na listagem"
+grep -q 'href=\\"/line-trash\\"' "$INDEX" || fail "Botão Lixeira não encontrado"
 
 systemctl restart xds-control
 sleep 2
@@ -57,4 +57,4 @@ printf '%s\n' "$HEALTH" | python3 -m json.tool 2>/dev/null || printf '%s\n' "$HE
 log "Atualização concluída"
 git log -1 --oneline
 printf '\nRotas confirmadas:\n'
-grep -nE "line-create|line-edit|line-audit" "$INDEX" | head -20 || true
+grep -nE "line-create|line-edit|line-audit|line-delete|line-trash|line-restore" "$INDEX" | head -30 || true
