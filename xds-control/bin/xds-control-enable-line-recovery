@@ -5,19 +5,15 @@ ROOT=/opt/XC_VM
 XDS_ROOT="$ROOT/xds-control"
 CFG="$XDS_ROOT/config/config.php"
 SQL="$XDS_ROOT/database/002_line_recovery.sql"
-MANAGEMENT="$XDS_ROOT/bin/xds-control-enable-lines-management"
-TRASH_UI="$XDS_ROOT/bin/xds-control-enable-line-trash-ui"
+BRIDGE="$XDS_ROOT/bin/xds-control-enable-lines-module"
 INDEX="$XDS_ROOT/public/index.php"
 
 [[ $EUID -eq 0 ]] || { echo "[XDS] Execute como root" >&2; exit 1; }
 [[ -f "$CFG" ]] || { echo "[XDS] config.php ausente" >&2; exit 1; }
 [[ -f "$SQL" ]] || { echo "[XDS] migration 002_line_recovery.sql ausente" >&2; exit 1; }
-[[ -x "$MANAGEMENT" ]] || { echo "[XDS] gerenciador de Linhas ausente/não executável: $MANAGEMENT" >&2; exit 1; }
-[[ -x "$TRASH_UI" ]] || { echo "[XDS] UI de lixeira ausente/não executável: $TRASH_UI" >&2; exit 1; }
+[[ -x "$BRIDGE" ]] || { echo "[XDS] bridge de Linhas ausente/não executável" >&2; exit 1; }
 
-# git reset --hard restaura o index.php base. Sempre recompomos o CRUD primeiro.
-echo "[XDS] Garantindo CRUD completo de Linhas antes da recuperação..."
-"$MANAGEMENT"
+"$BRIDGE"
 
 XDS_USER=$(awk -F"'" "/'username'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
 XDS_PASS=$(awk -F"'" "/'password'[[:space:]]*=>/ {print \$4; exit}" "$CFG")
@@ -32,25 +28,24 @@ PANEL_DB=$(awk -F"'" "/'panel_database'[[:space:]]*=>/ {print \$4; exit}" "$CFG"
 MYSQL_PWD="$XDS_PASS" mariadb --no-defaults -h "$XDS_HOST" -u "$XDS_USER" "$PANEL_DB" < "$SQL"
 unset MYSQL_PWD XDS_PASS
 
-# Agora que o schema existe, instala as rotas/botões de excluir, lixeira e restaurar.
-echo "[XDS] Instalando exclusão reversível e restauração..."
-"$TRASH_UI"
-
-# Validação funcional mínima.
-echo "[XDS] Validando rotas de Linhas..."
-for ROUTE in "line-create" "line-edit" "line-audit" "line-delete" "line-trash" "line-restore"; do
-    grep -q "$ROUTE" "$INDEX" || {
-        echo "[XDS] ERRO: rota $ROUTE não encontrada em $INDEX" >&2
-        exit 1
-    }
+for FILE in \
+  "$XDS_ROOT/app/LinesModule.php" \
+  "$XDS_ROOT/app/Controllers/LinesController.php" \
+  "$XDS_ROOT/app/Services/LineService.php" \
+  "$XDS_ROOT/app/Repositories/LineRepository.php" \
+  "$XDS_ROOT/app/Views/lines/index.php" \
+  "$XDS_ROOT/app/Views/lines/form.php" \
+  "$XDS_ROOT/app/Views/lines/trash.php" \
+  "$XDS_ROOT/app/Views/lines/audit.php"
+do
+  [[ -f "$FILE" ]] || { echo "[XDS] componente ausente: $FILE" >&2; exit 1; }
 done
+
+grep -q "LinesModule.php" "$INDEX" || { echo "[XDS] LinesModule não integrado" >&2; exit 1; }
 
 systemctl restart xds-control
 sleep 2
 curl -fsS http://127.0.0.1:9080/health >/dev/null
 
-echo "[XDS] Estrutura de recuperação de Linhas instalada."
-echo "[XDS] CRUD confirmado: criar, editar e auditar."
-echo "[XDS] Lixeira confirmada: excluir e restaurar."
-echo "[XDS] Exclusão reversível: snapshot + bloqueio da linha no engine."
-echo "[XDS] Edição em massa: snapshots agrupados por batch_uuid."
+echo "[XDS] Gerenciamento modular de Linhas instalado."
+echo "[XDS] Recursos: listar, criar, editar, auditar, excluir reversivelmente, lixeira e restaurar."
